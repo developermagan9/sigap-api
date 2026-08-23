@@ -1,0 +1,257 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────
+
+enum UserRole {
+  admin
+  petugas
+  verifikator
+  auditor
+}
+
+enum VerifikasiStatus {
+  pending
+  verified
+  rejected
+}
+
+enum HubunganKeluarga {
+  kepala
+  istri_suami
+  anak
+  orang_tua
+  famili_lain
+}
+
+enum ProgramStatus {
+  draft
+  clustering
+  ranking
+  alokasi
+  reviewed
+  approved
+  disbursed
+}
+
+enum SkemaAlokasi {
+  flat
+  berjenjang
+  proporsional
+}
+
+enum RankingStatus {
+  draft
+  final
+}
+
+enum DisbursementStatus {
+  pending
+  claimed
+  failed
+}
+
+enum WalletType {
+  mandiri
+  custodial
+}
+
+// ─── Models ──────────────────────────────────────────
+
+model Wilayah {
+  id        String   @id @default(uuid()) @db.Uuid
+  provinsi  String   @db.VarChar(100)
+  kabupaten String   @db.VarChar(100)
+  kecamatan String   @db.VarChar(100)
+  desa      String   @db.VarChar(100)
+
+  rumahTangga RumahTangga[]
+  users       User[]
+
+  @@map("wilayah")
+}
+
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  username      String    @unique @db.VarChar(255)
+  passwordHash  String    @map("password_hash") @db.VarChar(255)
+  nama          String    @db.VarChar(255)
+  role          UserRole
+  wilayahId     String?   @map("wilayah_id") @db.Uuid
+  walletAddress String?   @map("wallet_address") @db.VarChar(42)
+  isActive      Boolean   @default(true) @map("is_active")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  lastLoginAt   DateTime? @map("last_login_at") @db.Timestamptz
+
+  wilayah   Wilayah?   @relation(fields: [wilayahId], references: [id], onDelete: SetNull)
+  auditLogs AuditLog[]
+
+  @@map("users")
+}
+
+model RumahTangga {
+  id                       String           @id @default(uuid()) @db.Uuid
+  nikKkHash                String           @unique @map("nik_kk_hash") @db.VarChar(64)
+  noKkHash                 String           @unique @map("no_kk_hash") @db.VarChar(64)
+  wilayahId                String           @map("wilayah_id") @db.Uuid
+  pendapatanPerKapita      Decimal          @map("pendapatan_per_kapita") @db.Decimal(15, 2)
+  jumlahTanggungan         Int              @default(0) @map("jumlah_tanggungan")
+  jumlahDisabilitasLansia  Int              @default(0) @map("jumlah_disabilitas_lansia")
+  skorKondisiRumah         Int              @map("skor_kondisi_rumah") @db.SmallInt
+  skorAksesPendidikan      Int              @map("skor_akses_pendidikan") @db.SmallInt
+  riwayatBansosSebelumnya  Boolean          @default(false) @map("riwayat_bansos_sebelumnya")
+  statusVerifikasi         VerifikasiStatus @default(pending) @map("status_verifikasi")
+  flaggedDuplicate         Boolean          @default(false) @map("flagged_duplicate")
+  periodeId                String?          @map("periode_id") @db.Uuid
+  createdAt                DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+
+  wilayah            Wilayah              @relation(fields: [wilayahId], references: [id])
+  periode            PeriodeProgram?      @relation(fields: [periodeId], references: [id])
+  pii                RumahTanggaPii?
+  anggota            AnggotaKeluarga[]
+  rankingResults     RankingResult[]
+  disbursementRecords DisbursementRecord[]
+
+  @@map("rumah_tangga")
+}
+
+model RumahTanggaPii {
+  rumahTanggaId         String   @id @map("rumah_tangga_id") @db.Uuid
+  nikKepalaKeluargaEnc  Bytes    @map("nik_kepala_keluarga_enc")
+  noKkEnc               Bytes    @map("no_kk_enc")
+  namaKepalaKeluargaEnc Bytes    @map("nama_kepala_keluarga_enc")
+  alamatDetailEnc       Bytes    @map("alamat_detail_enc")
+  namaNormalized        String   @map("nama_normalized") @db.VarChar(255)
+  alamatNormalized      String   @default("") @map("alamat_normalized") @db.VarChar(500)
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  rumahTangga RumahTangga @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
+
+  @@map("rumah_tangga_pii")
+}
+
+model AnggotaKeluarga {
+  id              String            @id @default(uuid()) @db.Uuid
+  rumahTanggaId   String            @map("rumah_tangga_id") @db.Uuid
+  nikHash         String            @unique @map("nik_hash") @db.VarChar(64)
+  nikEnc          Bytes             @map("nik_enc")
+  namaEnc         Bytes             @map("nama_enc")
+  hubungan        HubunganKeluarga
+  tanggalLahir    DateTime          @map("tanggal_lahir") @db.Date
+  statusDisabilitas Boolean         @default(false) @map("status_disabilitas")
+  isTanggungan    Boolean           @default(true) @map("is_tanggungan")
+
+  rumahTangga RumahTangga @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
+
+  @@map("anggota_keluarga")
+}
+
+model PeriodeProgram {
+  id                String        @id @default(uuid()) @db.Uuid
+  namaProgram       String        @map("nama_program") @db.VarChar(255)
+  anggaranTotal     Decimal       @map("anggaran_total") @db.Decimal(18, 2)
+  biayaOperasional  Decimal       @default(0) @map("biaya_operasional") @db.Decimal(18, 2)
+  kCluster          Int           @default(4) @map("k_cluster")
+  clusterPrioritas  Int[]         @default([0, 1]) @map("cluster_prioritas")
+  bobotKriteria     Json          @map("bobot_kriteria")
+  skemaAlokasi      SkemaAlokasi  @default(flat) @map("skema_alokasi")
+  nominalDasar      Decimal       @default(500000) @map("nominal_dasar") @db.Decimal(15, 2)
+  faktorCluster     Json?         @map("faktor_cluster")
+  kuotaPenerima     Int?          @map("kuota_penerima")
+  totalAlokasi      Decimal?      @map("total_alokasi") @db.Decimal(18, 2)
+  sisaAnggaran      Decimal?      @map("sisa_anggaran") @db.Decimal(18, 2)
+  merkleRoot        String?       @map("merkle_root") @db.VarChar(66)
+  contractAddress   String?       @map("contract_address") @db.VarChar(42)
+  txHash            String?       @map("tx_hash") @db.VarChar(66)
+  status            ProgramStatus @default(draft)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  rumahTangga        RumahTangga[]
+  clusterResults     ClusterResult[]
+  rankingResults     RankingResult[]
+  disbursementRecords DisbursementRecord[]
+
+  @@map("periode_program")
+}
+
+model ClusterResult {
+  id            String   @id @default(uuid()) @db.Uuid
+  periodeId     String   @map("periode_id") @db.Uuid
+  clusterIndex  Int      @map("cluster_index")
+  label         String   @db.VarChar(50)
+  centroid      Json
+  jumlahAnggota Int      @map("jumlah_anggota")
+
+  periode        PeriodeProgram  @relation(fields: [periodeId], references: [id], onDelete: Cascade)
+  rankingResults RankingResult[]
+
+  @@unique([periodeId, clusterIndex])
+  @@map("cluster_result")
+}
+
+model RankingResult {
+  id                String        @id @default(uuid()) @db.Uuid
+  rumahTanggaId     String        @map("rumah_tangga_id") @db.Uuid
+  periodeId         String        @map("periode_id") @db.Uuid
+  clusterId         String        @map("cluster_id") @db.Uuid
+  skorTopsis        Decimal       @map("skor_topsis") @db.Decimal(6, 5)
+  dPlus             Decimal?      @map("d_plus") @db.Decimal(10, 8)
+  dMinus            Decimal?      @map("d_minus") @db.Decimal(10, 8)
+  rank              Int
+  breakdownKriteria Json          @map("breakdown_kriteria")
+  terpilih          Boolean       @default(false)
+  amount            Decimal?      @db.Decimal(15, 2)
+  status            RankingStatus @default(draft)
+
+  rumahTangga  RumahTangga    @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
+  periode      PeriodeProgram @relation(fields: [periodeId], references: [id], onDelete: Cascade)
+  cluster      ClusterResult  @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@unique([periodeId, rumahTanggaId])
+  @@map("ranking_result")
+}
+
+model DisbursementRecord {
+  id             String             @id @default(uuid()) @db.Uuid
+  rumahTanggaId  String             @map("rumah_tangga_id") @db.Uuid
+  periodeId      String             @map("periode_id") @db.Uuid
+  walletAddress  String             @map("wallet_address") @db.VarChar(42)
+  jenisWallet    WalletType         @default(mandiri) @map("jenis_wallet")
+  amount         Decimal            @db.Decimal(15, 2)
+  merkleLeafHash String             @map("merkle_leaf_hash") @db.VarChar(66)
+  txHash         String?            @map("tx_hash") @db.VarChar(66)
+  status         DisbursementStatus @default(pending)
+  claimedAt      DateTime?          @map("claimed_at") @db.Timestamptz
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz
+
+  rumahTangga RumahTangga    @relation(fields: [rumahTanggaId], references: [id], onDelete: Restrict)
+  periode     PeriodeProgram @relation(fields: [periodeId], references: [id], onDelete: Restrict)
+
+  @@unique([periodeId, rumahTanggaId])
+  @@map("disbursement_record")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  actorId     String?  @map("actor_id") @db.Uuid
+  action      String   @db.VarChar(100)
+  entityType  String   @map("entity_type") @db.VarChar(50)
+  entityId    String   @map("entity_id") @db.Uuid
+  beforeState Json?    @map("before_state")
+  afterState  Json?    @map("after_state")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@map("audit_log")
+}
