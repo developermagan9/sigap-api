@@ -1,4 +1,4 @@
-# SIGAP-Bansos API (Backend)
+# SIGAP-Bansos API
 
 Layanan backend untuk **SIGAP-Bansos** — Sistem Distribusi Bantuan Sosial Tepat Sasaran Berbasis Data Mining & Blockchain. Dibangun dengan **NestJS**, **Prisma ORM**, dan **PostgreSQL**.
 
@@ -10,8 +10,6 @@ Backend ini menangani:
 - Pencatatan Merkle tree & simulasi penyaluran dana on-chain
 - Audit log immutable untuk setiap perubahan status/kriteria
 - Endpoint publik untuk portal transparansi (ringkasan penyaluran, cek status klaim)
-
-Dokumentasi produk & desain teknis lengkap ada di [`../docs`](../docs) (mulai dari [`00-README.md`](../docs/00-README.md)). Status implementasi terkini ada di [`../docs/09-Implementation-Checklist.md`](../docs/09-Implementation-Checklist.md).
 
 ## Tech Stack
 - **NestJS 11** + TypeScript
