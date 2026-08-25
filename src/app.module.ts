@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { WilayahModule } from './wilayah/wilayah.module';
@@ -23,5 +24,6 @@ import { AuditModule } from './audit/audit.module';
     PublicModule,
     AuditModule,
   ],
+  controllers: [AppController],
 })
 export class AppModule {}
