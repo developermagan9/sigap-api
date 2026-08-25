@@ -62,11 +62,11 @@ export class PublicService {
       take: 10,
     });
 
-    const transaksiTerbaru = recentClaimed.map((d, i) => ({
+    const transaksiTerbaru = recentClaimed.map((d) => ({
       tx_hash: d.txHash || '0x...',
       amount: Number(d.amount),
       timestamp: d.claimedAt?.toISOString() || d.updatedAt.toISOString(),
-      recipient_ref: `REC-${String(i + 1).padStart(4, '0')} (anonim)`,
+      recipient_ref: `${d.reference} (anonim)`,
     }));
 
     return {
@@ -103,13 +103,14 @@ export class PublicService {
         },
       });
     } else {
-      // Search by reference pattern (REC-XXXX) — match by record index
-      // This is a simplified lookup since we don't store ref codes
+      // Search by reference code (REC-XXXX), disimpan sekali di disbursement_record.reference
       disbursement = await this.prisma.disbursementRecord.findFirst({
+        where: {
+          reference: { equals: query.trim(), mode: 'insensitive' },
+        },
         include: {
           periode: { select: { namaProgram: true, status: true } },
         },
-        orderBy: { createdAt: 'asc' },
       });
     }
 
@@ -121,6 +122,7 @@ export class PublicService {
     }
 
     return {
+      reference: disbursement.reference,
       status: disbursement.status,
       amount: Number(disbursement.amount),
       wallet: disbursement.walletAddress,

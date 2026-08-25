@@ -37,8 +37,9 @@ export class BlockchainService {
       where: { periodeId, status: 'final', terpilih: true },
       include: {
         rumahTangga: {
-          select: { id: true, nikKkHash: true },
-          include: {
+          select: {
+            id: true,
+            nikKkHash: true,
             disbursementRecords: {
               where: { periodeId },
               select: { walletAddress: true },
@@ -106,17 +107,25 @@ export class BlockchainService {
     const leafHashes = leaves.map((l) => l.leafHash);
     const merkleRoot = this.merkle.buildRoot(leafHashes);
 
-    // Create/update disbursement records
+    // Create/update disbursement records. `reference` (mis. REC-0231) dibuat
+    // sekali saat record pertama kali ada dan tidak pernah diubah lagi —
+    // ini identitas publik yang dipakai warga untuk cek status, jadi harus stabil.
+    let refCounter = await this.prisma.disbursementRecord.count();
+
     for (const leaf of leaves) {
       const rt = rankings.find((r) => '0x' + r.rumahTangga.nikKkHash.substring(0, 40) === leaf.recipient
         || r.rumahTangga.disbursementRecords?.[0]?.walletAddress === leaf.recipient);
 
       if (rt) {
+        const existing = rt.rumahTangga.disbursementRecords?.[0];
+        refCounter += existing ? 0 : 1;
+
         await this.prisma.disbursementRecord.upsert({
           where: {
             periodeId_rumahTanggaId: { periodeId, rumahTanggaId: rt.rumahTanggaId },
           },
           create: {
+            reference: `REC-${String(refCounter).padStart(4, '0')}`,
             rumahTanggaId: rt.rumahTanggaId,
             periodeId,
             walletAddress: leaf.recipient,
@@ -179,7 +188,35 @@ export class BlockchainService {
       where: { id: periodeId },
     });
 
-    // Generate a placeholder proof (in production, rebuild full tree and extract proof)
+    // Bangun ulang urutan leaf yang PERSIS sama seperti saat buildMerkle()
+    // menghitung root (rank ascending pada ranking final terpilih), supaya
+    // proof-nya benar-benar cocok dengan root yang sudah dikunci.
+    const rankings = await this.prisma.rankingResult.findMany({
+      where: { periodeId, status: 'final', terpilih: true },
+      include: {
+        rumahTangga: {
+          include: {
+            disbursementRecords: { where: { periodeId }, select: { merkleLeafHash: true } },
+          },
+        },
+      },
+      orderBy: { rank: 'asc' },
+    });
+
+    const leafHashes = rankings.map((r) => r.rumahTangga.disbursementRecords?.[0]?.merkleLeafHash ?? '');
+    const targetIndex = rankings.findIndex((r) => r.rumahTanggaId === disbursement.rumahTanggaId);
+
+    if (targetIndex === -1 || leafHashes.some((h) => !h)) {
+      throw new HttpException(
+        {
+          code: 'MERKLE_BELUM_DIBANGUN',
+          message: 'Merkle tree belum dibangun atau tidak konsisten untuk periode ini',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const proof = this.merkle.generateProof(leafHashes, targetIndex);
     const nikHash = '0x' + keccak256(toUtf8Bytes(disbursement.rumahTangga.nikKkHash)).substring(2);
 
     return {
@@ -187,7 +224,7 @@ export class BlockchainService {
       recipient: disbursement.walletAddress,
       amount: Number(disbursement.amount),
       nik_hash: nikHash,
-      proof: [disbursement.merkleLeafHash], // Simplified proof
+      proof,
       sudah_diklaim: disbursement.status === 'claimed',
       contract_address: periode?.contractAddress || process.env.DISBURSEMENT_CONTRACT_ADDRESS || '0x...',
     };

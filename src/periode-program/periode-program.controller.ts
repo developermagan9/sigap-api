@@ -33,7 +33,7 @@ export class PeriodeProgramController {
   }
 
   @Get()
-  @Roles('admin')
+  @Roles('admin', 'verifikator', 'petugas')
   @ApiOperation({ summary: 'Daftar semua periode program' })
   @ApiResponse({ status: 200, description: 'Daftar periode program berhasil diambil' })
   findAll() {
@@ -41,7 +41,7 @@ export class PeriodeProgramController {
   }
 
   @Get(':id')
-  @Roles('admin')
+  @Roles('admin', 'verifikator', 'petugas')
   @ApiOperation({ summary: 'Detail satu periode program' })
   @ApiResponse({ status: 200, description: 'Detail periode program berhasil diambil' })
   @ApiResponse({ status: 404, description: 'Periode program tidak ditemukan' })
@@ -65,7 +65,7 @@ export class PeriodeProgramController {
   }
 
   @Get(':id/summary')
-  @Roles('admin')
+  @Roles('admin', 'verifikator', 'petugas')
   @ApiOperation({ summary: 'Ringkasan statistik agregat periode program' })
   @ApiResponse({ status: 200, description: 'Statistik periode berhasil diambil' })
   @ApiResponse({ status: 404, description: 'Periode program tidak ditemukan' })

@@ -1,15 +1,13 @@
 import { Controller, Post, Get, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 import { MiningService } from './mining.service';
 import { RunClusteringDto, RunTopsisDto, RunAlokasiDto, FinalizeRankingDto } from './dto/mining.dto';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
 
-// Pseudo-imports for guards assuming common structure
-// import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-// import { RolesGuard } from '../auth/roles.guard';
-// import { Roles } from '../auth/roles.decorator';
-
-@Controller('v1/periode-program')
-// @UseGuards(JwtAuthGuard, RolesGuard)
-// @Roles('admin')
+@Controller('periode-program')
+@UseGuards(AuthGuard('jwt'), RolesGuard)
+@Roles('admin')
 export class MiningController {
   constructor(private readonly miningService: MiningService) {}
 

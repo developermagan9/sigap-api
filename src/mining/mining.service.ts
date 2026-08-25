@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service';
 import { KMeansService, LABEL_KERENTANAN } from './kmeans.service';
 import { TopsisService, KriteriaSpec } from './topsis.service';
 import { AlokasiService, KandidatAlokasi } from './alokasi.service';
+import { PeriodeProgramService } from '../periode-program/periode-program.service';
 
 export const KRITERIA_DEFAULT: KriteriaSpec[] = [
   { key: 'pendapatanPerKapita', label: 'Pendapatan per kapita', benefit: false },
@@ -29,6 +30,7 @@ export class MiningService {
     private kmeans: KMeansService,
     private topsis: TopsisService,
     private alokasi: AlokasiService,
+    private periodeProgramService: PeriodeProgramService,
   ) {}
 
   /**
@@ -320,6 +322,7 @@ export class MiningService {
     return {
       results: results.map((r) => ({
         rumah_tangga_id: r.rumahTanggaId,
+        nik_kk_hash: r.rumahTangga.nikKkHash,
         cluster_label: r.cluster.label,
         rank: r.rank,
         skor_topsis: Number(r.skorTopsis),
@@ -458,11 +461,13 @@ export class MiningService {
       data: { status: 'final' },
     });
 
-    // Update period status
-    await this.prisma.periodeProgram.update({
-      where: { id: periodeId },
-      data: { status: 'approved' },
-    });
+    // Route the status change through the single source of truth for the FSM
+    // (PeriodeProgramService.updateStatus), which only allows one step at a
+    // time (alokasi -> reviewed -> approved).
+    if (periode.status === 'alokasi') {
+      await this.periodeProgramService.updateStatus(periodeId, 'reviewed', approvedBy);
+    }
+    await this.periodeProgramService.updateStatus(periodeId, 'approved', approvedBy);
 
     await this.audit.log({
       actorId: approvedBy,

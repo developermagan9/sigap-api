@@ -2,7 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsString, IsNumber, IsBoolean, IsUUID, IsArray,
   ValidateNested, IsEnum, IsDateString, Min, Max,
-  Length, ArrayMinSize,
+  Length, ArrayMinSize, IsOptional,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
@@ -85,6 +85,7 @@ export class CreateRumahTanggaDto {
   anggota: AnggotaDto[];
 
   // Optional: link to a program period
+  @IsOptional()
   @IsUUID()
   @ApiProperty({ required: false })
   periode_id?: string;

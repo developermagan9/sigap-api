@@ -146,14 +146,24 @@ export class RumahTanggaService {
     };
   }
 
-  async findAll(filters: { wilayah_id?: string; status?: string; page?: number; limit?: number }) {
+  async findAll(
+    filters: { wilayah_id?: string; periode_id?: string; status?: string; page?: number; limit?: number },
+    user?: { role?: string; wilayahId?: string | null },
+  ) {
     const page = filters.page || 1;
     const limit = filters.limit || 10;
     const skip = (page - 1) * limit;
 
     const where: any = {};
-    if (filters.wilayah_id) {
+    if (user && user.role !== 'admin') {
+      // petugas/verifikator can only ever see their own wilayah, regardless of
+      // what wilayah_id was requested in the query string.
+      where.wilayahId = user.wilayahId ?? '__no_wilayah__';
+    } else if (filters.wilayah_id) {
       where.wilayahId = filters.wilayah_id;
+    }
+    if (filters.periode_id) {
+      where.periodeId = filters.periode_id;
     }
     if (filters.status) {
       where.statusVerifikasi = filters.status;

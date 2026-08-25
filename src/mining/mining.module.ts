@@ -5,9 +5,10 @@ import { AlokasiService } from './alokasi.service';
 import { MiningService } from './mining.service';
 import { MiningController } from './mining.controller';
 import { AuditModule } from '../audit/audit.module';
+import { PeriodeProgramModule } from '../periode-program/periode-program.module';
 
 @Module({
-  imports: [AuditModule],
+  imports: [AuditModule, PeriodeProgramModule],
   controllers: [MiningController],
   providers: [
     KMeansService,

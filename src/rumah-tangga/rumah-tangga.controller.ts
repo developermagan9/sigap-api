@@ -15,7 +15,7 @@ export class RumahTanggaController {
   constructor(private readonly rumahTanggaService: RumahTanggaService) {}
 
   @Post()
-  @Roles('petugas')
+  @Roles('petugas', 'admin')
   create(@Body() dto: CreateRumahTanggaDto, @Request() req: any) {
     return this.rumahTanggaService.create(dto, req.user?.id);
   }
@@ -29,7 +29,7 @@ export class RumahTanggaController {
   }
 
   @Patch(':id/verifikasi')
-  @Roles('verifikator')
+  @Roles('verifikator', 'admin')
   verifikasi(
     @Param('id') id: string,
     @Body() dto: VerifikasiDto,
@@ -39,18 +39,24 @@ export class RumahTanggaController {
   }
 
   @Get()
-  @Roles('admin', 'verifikator')
+  @Roles('admin', 'verifikator', 'petugas')
   findAll(
+    @Request() req: any,
     @Query('wilayah_id') wilayah_id?: string,
+    @Query('periode_id') periode_id?: string,
     @Query('status') status?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.rumahTanggaService.findAll({
-      wilayah_id,
-      status,
-      page: page ? parseInt(page, 10) : 1,
-      limit: limit ? parseInt(limit, 10) : 10,
-    });
+    return this.rumahTanggaService.findAll(
+      {
+        wilayah_id,
+        periode_id,
+        status,
+        page: page ? parseInt(page, 10) : 1,
+        limit: limit ? parseInt(limit, 10) : 10,
+      },
+      req.user,
+    );
   }
 }
