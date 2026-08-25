@@ -186,10 +186,17 @@ export class MiningService {
       throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
     }
 
-    // Get clusters in target indices
-    const clusters = await this.prisma.clusterResult.findMany({
+    // Get clusters in target indices. Prisma/Postgres does not guarantee row
+    // order for `in` filters without an explicit orderBy, so we re-sort to
+    // match clusterIndexTarget's order ourselves — globalRank below is
+    // assigned by iterating `clusters` in sequence, and that sequence IS the
+    // cluster priority (e.g. "Sangat Rentan" must be ranked before "Rentan").
+    const clustersUnordered = await this.prisma.clusterResult.findMany({
       where: { periodeId, clusterIndex: { in: clusterIndexTarget } },
     });
+    const clusters = [...clustersUnordered].sort(
+      (a, b) => clusterIndexTarget.indexOf(a.clusterIndex) - clusterIndexTarget.indexOf(b.clusterIndex),
+    );
 
     if (clusters.length === 0) {
       throw new HttpException(
