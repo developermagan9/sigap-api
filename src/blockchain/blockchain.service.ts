@@ -2,7 +2,15 @@ import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MerkleService, MerkleLeaf } from './merkle.service';
-import { keccak256, toUtf8Bytes } from 'ethers';
+import { keccak256, toUtf8Bytes, Contract, Wallet, JsonRpcProvider } from 'ethers';
+import { deriveCustodialWallet } from '../common/crypto.util';
+
+// Cuma fragmen yang benar-benar dipanggil dari sini — ABI penuh ada di paket
+// sigap-contracts (repo terpisah), sengaja tidak diimpor supaya sigap-api tidak
+// bergantung pada artifact build Hardhat.
+const REGISTRY_ABI = [
+  'function registerPeriode(uint256 periodeId, bytes32 merkleRoot, uint256 totalAlokasi) external',
+];
 
 @Injectable()
 export class BlockchainService {
@@ -40,9 +48,11 @@ export class BlockchainService {
           select: {
             id: true,
             nikKkHash: true,
+            walletAddress: true,
+            jenisWallet: true,
             disbursementRecords: {
               where: { periodeId },
-              select: { walletAddress: true },
+              select: { walletAddress: true, jenisWallet: true },
             },
           },
         },
@@ -57,16 +67,24 @@ export class BlockchainService {
       );
     }
 
-    // Build leaves
+    // Build leaves. Prioritas sumber wallet: record disbursement periode ini yang sudah ada
+    // (build-merkle diulang) > wallet asli yang dikumpulkan saat pendataan (`rumah_tangga.wallet_address`,
+    // lihat rumah-tangga.service.ts create()) > placeholder custodial deterministik untuk baris lama
+    // yang dibuat sebelum kolom wallet ada. `rumahTanggaId` disimpan berdampingan (bukan re-derive dari
+    // alamat) supaya pencocokan ke DisbursementRecord di bawah tidak bergantung pada skema alamat.
     const periodeIdNum = parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
-    const leaves: MerkleLeaf[] = [];
+    const leaves: (MerkleLeaf & { rumahTanggaId: string; jenisWallet: 'mandiri' | 'custodial' })[] = [];
 
     for (const r of rankings) {
-      // Use existing disbursement wallet or generate a mock custodial wallet
-      let walletAddress = r.rumahTangga.disbursementRecords?.[0]?.walletAddress;
+      const existing = r.rumahTangga.disbursementRecords?.[0];
+      let walletAddress = existing?.walletAddress ?? r.rumahTangga.walletAddress ?? undefined;
+      let jenisWallet: 'mandiri' | 'custodial' =
+        (existing?.jenisWallet as 'mandiri' | 'custodial' | undefined) ??
+        (r.rumahTangga.jenisWallet as 'mandiri' | 'custodial' | null) ??
+        'custodial';
       if (!walletAddress) {
-        // Generate a deterministic mock wallet from nikKkHash
-        walletAddress = '0x' + r.rumahTangga.nikKkHash.substring(0, 40);
+        walletAddress = deriveCustodialWallet(r.rumahTangga.id);
+        jenisWallet = 'custodial';
       }
 
       const nikHash = '0x' + keccak256(toUtf8Bytes(r.rumahTangga.nikKkHash)).substring(2);
@@ -80,6 +98,8 @@ export class BlockchainService {
         periodeId: periodeIdNum,
         nikHash,
         leafHash,
+        rumahTanggaId: r.rumahTanggaId,
+        jenisWallet,
       });
     }
 
@@ -113,32 +133,30 @@ export class BlockchainService {
     let refCounter = await this.prisma.disbursementRecord.count();
 
     for (const leaf of leaves) {
-      const rt = rankings.find((r) => '0x' + r.rumahTangga.nikKkHash.substring(0, 40) === leaf.recipient
-        || r.rumahTangga.disbursementRecords?.[0]?.walletAddress === leaf.recipient);
+      const rt = rankings.find((r) => r.rumahTanggaId === leaf.rumahTanggaId);
+      if (!rt) continue;
 
-      if (rt) {
-        const existing = rt.rumahTangga.disbursementRecords?.[0];
-        refCounter += existing ? 0 : 1;
+      const existing = rt.rumahTangga.disbursementRecords?.[0];
+      refCounter += existing ? 0 : 1;
 
-        await this.prisma.disbursementRecord.upsert({
-          where: {
-            periodeId_rumahTanggaId: { periodeId, rumahTanggaId: rt.rumahTanggaId },
-          },
-          create: {
-            reference: `REC-${String(refCounter).padStart(4, '0')}`,
-            rumahTanggaId: rt.rumahTanggaId,
-            periodeId,
-            walletAddress: leaf.recipient,
-            jenisWallet: 'custodial',
-            amount: Number(leaf.amount),
-            merkleLeafHash: leaf.leafHash,
-            status: 'pending',
-          },
-          update: {
-            merkleLeafHash: leaf.leafHash,
-          },
-        });
-      }
+      await this.prisma.disbursementRecord.upsert({
+        where: {
+          periodeId_rumahTanggaId: { periodeId, rumahTanggaId: rt.rumahTanggaId },
+        },
+        create: {
+          reference: `REC-${String(refCounter).padStart(4, '0')}`,
+          rumahTanggaId: rt.rumahTanggaId,
+          periodeId,
+          walletAddress: leaf.recipient,
+          jenisWallet: leaf.jenisWallet,
+          amount: Number(leaf.amount),
+          merkleLeafHash: leaf.leafHash,
+          status: 'pending',
+        },
+        update: {
+          merkleLeafHash: leaf.leafHash,
+        },
+      });
     }
 
     // Save merkle root to periode
@@ -248,14 +266,47 @@ export class BlockchainService {
       );
     }
 
-    // Simulate tx hash (in production, use ethers.js to submit to contract)
-    const mockTxHash = '0x' + keccak256(toUtf8Bytes(`tx-${periodeId}-${Date.now()}`)).substring(2);
-    const contractAddress = process.env.REGISTRY_CONTRACT_ADDRESS || '0x7a1c9F4b2E8d3A5c6B0f1D8e4C2a9B7d3E5f0A16';
+    // periodeId (UUID) -> uint256 numerik: HARUS identik dengan derivasi yang dipakai
+    // buildMerkle() saat menghitung leaf, karena claim() di kontrak mem-verifikasi
+    // proof terhadap periodeId numerik ini, bukan UUID string-nya.
+    const periodeIdNum = parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
+
+    const chain = this.getChainConfig();
+    let txHash: string;
+    let contractAddress: string;
+    let simulated: boolean;
+
+    if (chain) {
+      // Registrasi sungguhan: mengunci merkleRoot on-chain lewat BansosRegistry.registerPeriode().
+      const provider = new JsonRpcProvider(chain.rpcUrl);
+      const wallet = new Wallet(chain.privateKey, provider);
+      const registry = new Contract(chain.registryAddress, REGISTRY_ABI, wallet);
+
+      const tx = await registry.registerPeriode(
+        periodeIdNum,
+        periode.merkleRoot,
+        BigInt(Math.round(Number(periode.totalAlokasi))),
+      );
+      const receipt = await tx.wait();
+
+      txHash = receipt.hash;
+      contractAddress = chain.registryAddress;
+      simulated = false;
+    } else {
+      // Belum ada kontrak sungguhan yang di-deploy (lihat sigap-contracts/ — kontrak dan
+      // test-nya sudah ada, tapi ADMIN_PRIVATE_KEY/REGISTRY_CONTRACT_ADDRESS di .env
+      // masih placeholder). Simulasi tetap dipertahankan sesuai
+      // 07-Security-Privacy-Ethics.md §7 — dinyatakan terbuka sebagai simulasi, bukan
+      // disamarkan sebagai transaksi nyata.
+      txHash = '0x' + keccak256(toUtf8Bytes(`tx-${periodeId}-${Date.now()}`)).substring(2);
+      contractAddress = process.env.REGISTRY_CONTRACT_ADDRESS || '0x7a1c9F4b2E8d3A5c6B0f1D8e4C2a9B7d3E5f0A16';
+      simulated = true;
+    }
 
     await this.prisma.periodeProgram.update({
       where: { id: periodeId },
       data: {
-        txHash: mockTxHash,
+        txHash,
         contractAddress,
         status: 'disbursed',
       },
@@ -266,14 +317,28 @@ export class BlockchainService {
       action: 'submit_onchain',
       entityType: 'periode_program',
       entityId: periodeId,
-      afterState: { txHash: mockTxHash, contractAddress, network: 'polygon-amoy' },
+      afterState: { txHash, contractAddress, network: 'polygon-amoy', simulated },
     });
 
     return {
-      tx_hash: mockTxHash,
+      tx_hash: txHash,
       contract_address: contractAddress,
       network: 'polygon-amoy',
+      simulated,
     };
+  }
+
+  /** Kredensial chain lengkap & valid (bukan placeholder .env.example) -> null kalau belum siap. */
+  private getChainConfig(): { rpcUrl: string; privateKey: string; registryAddress: string } | null {
+    const rpcUrl = process.env.RPC_URL;
+    const privateKey = process.env.ADMIN_PRIVATE_KEY;
+    const registryAddress = process.env.REGISTRY_CONTRACT_ADDRESS;
+
+    if (!rpcUrl || !privateKey || !registryAddress) return null;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) return null; // masih placeholder
+    if (!/^0x[0-9a-fA-F]{40}$/.test(registryAddress)) return null;
+
+    return { rpcUrl, privateKey, registryAddress };
   }
 
   /**

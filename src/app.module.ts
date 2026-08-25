@@ -10,6 +10,7 @@ import { MiningModule } from './mining/mining.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { PublicModule } from './public/public.module';
 import { AuditModule } from './audit/audit.module';
+import { SanggahanModule } from './sanggahan/sanggahan.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { AuditModule } from './audit/audit.module';
     BlockchainModule,
     PublicModule,
     AuditModule,
+    SanggahanModule,
   ],
   controllers: [AppController],
 })

@@ -1,7 +1,8 @@
 import { Injectable, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { hashWithPepper, encrypt, normalizeName, jaroWinkler } from '../common/crypto.util';
+import { hashWithPepper, encrypt, normalizeName, jaroWinkler, deriveCustodialWallet } from '../common/crypto.util';
 import { CreateRumahTanggaDto } from './dto/create-rumah-tangga.dto';
 import { VerifikasiDto } from './dto/verifikasi.dto';
 
@@ -85,9 +86,22 @@ export class RumahTanggaService {
       }
     }
 
+    // Wallet dikumpulkan di sini (bukan di-derive palsu nanti saat build-merkle).
+    // 'mandiri' butuh alamat asli dari DTO; 'custodial' tanpa alamat dapat placeholder
+    // deterministik — perlu id baris ditentukan dulu supaya bisa jadi seed derivasinya.
+    const rumahTanggaId = randomUUID();
+    let walletAddress = dto.wallet_address ?? null;
+    let jenisWallet = dto.jenis_wallet ?? null;
+    if (jenisWallet === 'custodial' && !walletAddress) {
+      walletAddress = deriveCustodialWallet(rumahTanggaId);
+    } else if (walletAddress && !jenisWallet) {
+      jenisWallet = 'mandiri';
+    }
+
     const result = await this.prisma.$transaction(async (tx) => {
       const rt = await tx.rumahTangga.create({
         data: {
+          id: rumahTanggaId,
           nikKkHash: nikKkHash,
           noKkHash: noKkHash,
           wilayahId: dto.wilayah_id,
@@ -100,6 +114,8 @@ export class RumahTanggaService {
           flaggedDuplicate,
           statusVerifikasi: 'pending',
           periodeId: dto.periode_id,
+          walletAddress: walletAddress ?? undefined,
+          jenisWallet: (jenisWallet as any) ?? undefined,
           pii: {
             create: {
               nikKepalaKeluargaEnc: nikEnc,

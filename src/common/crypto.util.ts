@@ -13,6 +13,22 @@ export function hashWithPepper(value: string): string {
 }
 
 /**
+ * Placeholder wallet address for penerima yang belum punya wallet sendiri
+ * ("custodial" — dikelola pendamping desa, lihat 07-Security-Privacy-Ethics.md §6).
+ * Deterministik dari `seed` (biasanya `rumahTangga.id`) + pepper terpisah, jadi tetap
+ * stabil antar panggilan tanpa membocorkan `nikKkHash` lewat alamat yang tampil publik.
+ *
+ * INI BUKAN WALLET NYATA — tidak ada private key di baliknya, jadi tidak ada dana yang
+ * benar-benar bisa diklaim ke alamat ini sampai penyediaan wallet custodial sungguhan
+ * (mis. lewat MPC/HSM yang dikelola pendamping desa) dibangun. Dipakai supaya alur
+ * build-merkle tetap punya `recipient` yang valid secara format untuk demo/testing.
+ */
+export function deriveCustodialWallet(seed: string): string {
+  const hash = createHash('sha256').update(`custodial:${seed}:${PEPPER}`).digest('hex');
+  return '0x' + hash.slice(0, 40);
+}
+
+/**
  * AES-256-CBC encrypt for PII storage.
  * Returns IV prepended to ciphertext as a single Buffer.
  */

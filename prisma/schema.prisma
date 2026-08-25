@@ -57,6 +57,12 @@ enum DisbursementStatus {
   failed
 }
 
+enum StatusSanggahan {
+  pending
+  diterima
+  ditolak
+}
+
 enum WalletType {
   mandiri
   custodial
@@ -65,11 +71,11 @@ enum WalletType {
 // ─── Models ──────────────────────────────────────────
 
 model Wilayah {
-  id        String   @id @default(uuid()) @db.Uuid
-  provinsi  String   @db.VarChar(100)
-  kabupaten String   @db.VarChar(100)
-  kecamatan String   @db.VarChar(100)
-  desa      String   @db.VarChar(100)
+  id        String @id @default(uuid()) @db.Uuid
+  provinsi  String @db.VarChar(100)
+  kabupaten String @db.VarChar(100)
+  kecamatan String @db.VarChar(100)
+  desa      String @db.VarChar(100)
 
   rumahTangga RumahTangga[]
   users       User[]
@@ -89,35 +95,45 @@ model User {
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
   lastLoginAt   DateTime? @map("last_login_at") @db.Timestamptz
 
-  wilayah   Wilayah?   @relation(fields: [wilayahId], references: [id], onDelete: SetNull)
-  auditLogs AuditLog[]
+  wilayah           Wilayah?           @relation(fields: [wilayahId], references: [id], onDelete: SetNull)
+  auditLogs         AuditLog[]
+  sanggahanDiajukan SanggahanRequest[] @relation("SanggahanDiajukan")
+  sanggahanDitinjau SanggahanRequest[] @relation("SanggahanDitinjau")
 
   @@map("users")
 }
 
 model RumahTangga {
-  id                       String           @id @default(uuid()) @db.Uuid
-  nikKkHash                String           @unique @map("nik_kk_hash") @db.VarChar(64)
-  noKkHash                 String           @unique @map("no_kk_hash") @db.VarChar(64)
-  wilayahId                String           @map("wilayah_id") @db.Uuid
-  pendapatanPerKapita      Decimal          @map("pendapatan_per_kapita") @db.Decimal(15, 2)
-  jumlahTanggungan         Int              @default(0) @map("jumlah_tanggungan")
-  jumlahDisabilitasLansia  Int              @default(0) @map("jumlah_disabilitas_lansia")
-  skorKondisiRumah         Int              @map("skor_kondisi_rumah") @db.SmallInt
-  skorAksesPendidikan      Int              @map("skor_akses_pendidikan") @db.SmallInt
-  riwayatBansosSebelumnya  Boolean          @default(false) @map("riwayat_bansos_sebelumnya")
-  statusVerifikasi         VerifikasiStatus @default(pending) @map("status_verifikasi")
-  flaggedDuplicate         Boolean          @default(false) @map("flagged_duplicate")
-  periodeId                String?          @map("periode_id") @db.Uuid
-  createdAt                DateTime         @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt                DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+  id                      String           @id @default(uuid()) @db.Uuid
+  nikKkHash               String           @unique @map("nik_kk_hash") @db.VarChar(64)
+  noKkHash                String           @unique @map("no_kk_hash") @db.VarChar(64)
+  wilayahId               String           @map("wilayah_id") @db.Uuid
+  pendapatanPerKapita     Decimal          @map("pendapatan_per_kapita") @db.Decimal(15, 2)
+  jumlahTanggungan        Int              @default(0) @map("jumlah_tanggungan")
+  jumlahDisabilitasLansia Int              @default(0) @map("jumlah_disabilitas_lansia")
+  skorKondisiRumah        Int              @map("skor_kondisi_rumah") @db.SmallInt
+  skorAksesPendidikan     Int              @map("skor_akses_pendidikan") @db.SmallInt
+  riwayatBansosSebelumnya Boolean          @default(false) @map("riwayat_bansos_sebelumnya")
+  statusVerifikasi        VerifikasiStatus @default(pending) @map("status_verifikasi")
+  flaggedDuplicate        Boolean          @default(false) @map("flagged_duplicate")
+  periodeId               String?          @map("periode_id") @db.Uuid
+  // Wallet penerima dikumpulkan saat pendataan — dipakai langsung sebagai `recipient`
+  // saat build-merkle, menggantikan alamat palsu yang sebelumnya di-derive dari hash NIK.
+  // `mandiri` = wallet milik penerima sendiri; `custodial` = dikelola pendamping desa
+  // (lihat 07-Security-Privacy-Ethics.md §6). Nullable karena belum wajib di seluruh alur —
+  // fallback custodial deterministik tetap ada di blockchain.service.ts bila kosong.
+  walletAddress           String?          @map("wallet_address") @db.VarChar(42)
+  jenisWallet             WalletType?      @map("jenis_wallet")
+  createdAt               DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt               DateTime         @updatedAt @map("updated_at") @db.Timestamptz
 
-  wilayah            Wilayah              @relation(fields: [wilayahId], references: [id])
-  periode            PeriodeProgram?      @relation(fields: [periodeId], references: [id])
-  pii                RumahTanggaPii?
-  anggota            AnggotaKeluarga[]
-  rankingResults     RankingResult[]
+  wilayah             Wilayah              @relation(fields: [wilayahId], references: [id])
+  periode             PeriodeProgram?      @relation(fields: [periodeId], references: [id])
+  pii                 RumahTanggaPii?
+  anggota             AnggotaKeluarga[]
+  rankingResults      RankingResult[]
   disbursementRecords DisbursementRecord[]
+  sanggahanRequests   SanggahanRequest[]
 
   @@map("rumah_tangga")
 }
@@ -139,15 +155,15 @@ model RumahTanggaPii {
 }
 
 model AnggotaKeluarga {
-  id              String            @id @default(uuid()) @db.Uuid
-  rumahTanggaId   String            @map("rumah_tangga_id") @db.Uuid
-  nikHash         String            @unique @map("nik_hash") @db.VarChar(64)
-  nikEnc          Bytes             @map("nik_enc")
-  namaEnc         Bytes             @map("nama_enc")
-  hubungan        HubunganKeluarga
-  tanggalLahir    DateTime          @map("tanggal_lahir") @db.Date
-  statusDisabilitas Boolean         @default(false) @map("status_disabilitas")
-  isTanggungan    Boolean           @default(true) @map("is_tanggungan")
+  id                String           @id @default(uuid()) @db.Uuid
+  rumahTanggaId     String           @map("rumah_tangga_id") @db.Uuid
+  nikHash           String           @unique @map("nik_hash") @db.VarChar(64)
+  nikEnc            Bytes            @map("nik_enc")
+  namaEnc           Bytes            @map("nama_enc")
+  hubungan          HubunganKeluarga
+  tanggalLahir      DateTime         @map("tanggal_lahir") @db.Date
+  statusDisabilitas Boolean          @default(false) @map("status_disabilitas")
+  isTanggungan      Boolean          @default(true) @map("is_tanggungan")
 
   rumahTangga RumahTangga @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
 
@@ -155,41 +171,41 @@ model AnggotaKeluarga {
 }
 
 model PeriodeProgram {
-  id                String        @id @default(uuid()) @db.Uuid
-  namaProgram       String        @map("nama_program") @db.VarChar(255)
-  anggaranTotal     Decimal       @map("anggaran_total") @db.Decimal(18, 2)
-  biayaOperasional  Decimal       @default(0) @map("biaya_operasional") @db.Decimal(18, 2)
-  kCluster          Int           @default(4) @map("k_cluster")
-  clusterPrioritas  Int[]         @default([0, 1]) @map("cluster_prioritas")
-  bobotKriteria     Json          @map("bobot_kriteria")
-  skemaAlokasi      SkemaAlokasi  @default(flat) @map("skema_alokasi")
-  nominalDasar      Decimal       @default(500000) @map("nominal_dasar") @db.Decimal(15, 2)
-  faktorCluster     Json?         @map("faktor_cluster")
-  kuotaPenerima     Int?          @map("kuota_penerima")
-  totalAlokasi      Decimal?      @map("total_alokasi") @db.Decimal(18, 2)
-  sisaAnggaran      Decimal?      @map("sisa_anggaran") @db.Decimal(18, 2)
-  merkleRoot        String?       @map("merkle_root") @db.VarChar(66)
-  contractAddress   String?       @map("contract_address") @db.VarChar(42)
-  txHash            String?       @map("tx_hash") @db.VarChar(66)
-  status            ProgramStatus @default(draft)
-  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+  id               String        @id @default(uuid()) @db.Uuid
+  namaProgram      String        @map("nama_program") @db.VarChar(255)
+  anggaranTotal    Decimal       @map("anggaran_total") @db.Decimal(18, 2)
+  biayaOperasional Decimal       @default(0) @map("biaya_operasional") @db.Decimal(18, 2)
+  kCluster         Int           @default(4) @map("k_cluster")
+  clusterPrioritas Int[]         @default([0, 1]) @map("cluster_prioritas")
+  bobotKriteria    Json          @map("bobot_kriteria")
+  skemaAlokasi     SkemaAlokasi  @default(flat) @map("skema_alokasi")
+  nominalDasar     Decimal       @default(500000) @map("nominal_dasar") @db.Decimal(15, 2)
+  faktorCluster    Json?         @map("faktor_cluster")
+  kuotaPenerima    Int?          @map("kuota_penerima")
+  totalAlokasi     Decimal?      @map("total_alokasi") @db.Decimal(18, 2)
+  sisaAnggaran     Decimal?      @map("sisa_anggaran") @db.Decimal(18, 2)
+  merkleRoot       String?       @map("merkle_root") @db.VarChar(66)
+  contractAddress  String?       @map("contract_address") @db.VarChar(42)
+  txHash           String?       @map("tx_hash") @db.VarChar(66)
+  status           ProgramStatus @default(draft)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
-  rumahTangga        RumahTangga[]
-  clusterResults     ClusterResult[]
-  rankingResults     RankingResult[]
+  rumahTangga         RumahTangga[]
+  clusterResults      ClusterResult[]
+  rankingResults      RankingResult[]
   disbursementRecords DisbursementRecord[]
 
   @@map("periode_program")
 }
 
 model ClusterResult {
-  id            String   @id @default(uuid()) @db.Uuid
-  periodeId     String   @map("periode_id") @db.Uuid
-  clusterIndex  Int      @map("cluster_index")
-  label         String   @db.VarChar(50)
+  id            String @id @default(uuid()) @db.Uuid
+  periodeId     String @map("periode_id") @db.Uuid
+  clusterIndex  Int    @map("cluster_index")
+  label         String @db.VarChar(50)
   centroid      Json
-  jumlahAnggota Int      @map("jumlah_anggota")
+  jumlahAnggota Int    @map("jumlah_anggota")
 
   periode        PeriodeProgram  @relation(fields: [periodeId], references: [id], onDelete: Cascade)
   rankingResults RankingResult[]
@@ -212,9 +228,9 @@ model RankingResult {
   amount            Decimal?      @db.Decimal(15, 2)
   status            RankingStatus @default(draft)
 
-  rumahTangga  RumahTangga    @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
-  periode      PeriodeProgram @relation(fields: [periodeId], references: [id], onDelete: Cascade)
-  cluster      ClusterResult  @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  rumahTangga RumahTangga    @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
+  periode     PeriodeProgram @relation(fields: [periodeId], references: [id], onDelete: Cascade)
+  cluster     ClusterResult  @relation(fields: [clusterId], references: [id], onDelete: Cascade)
 
   @@unique([periodeId, rumahTanggaId])
   @@map("ranking_result")
@@ -255,4 +271,31 @@ model AuditLog {
   actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@map("audit_log")
+}
+
+/// Jalur sanggahan/koreksi data — 01-PRD.md (tabel risiko titik cutoff) dan
+/// 07-Security-Privacy-Ethics.md §4.4: warga yang merasa data/skornya keliru
+/// bisa mengajukan koreksi lewat verifikator, BUKAN override skor manual.
+/// Menyetujui sanggahan cuma mengubah field mentah `RumahTangga` — re-kalkulasi
+/// skor terjadi otomatis di run berikutnya (`run-clustering`/`run-topsis` selalu
+/// baca data terbaru), tidak ada jalur override skor langsung di model ini.
+model SanggahanRequest {
+  id             String          @id @default(uuid()) @db.Uuid
+  rumahTanggaId  String          @map("rumah_tangga_id") @db.Uuid
+  diajukanOlehId String          @map("diajukan_oleh_id") @db.Uuid
+  alasan         String          @db.Text
+  /// Subset field RumahTangga yang diusulkan berubah, mis.
+  /// { "pendapatan_per_kapita": 450000, "skor_kondisi_rumah": 3 }
+  dataBaru       Json            @map("data_baru")
+  status         StatusSanggahan @default(pending)
+  catatanReview  String?         @map("catatan_review") @db.Text
+  ditinjauOlehId String?         @map("ditinjau_oleh_id") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  reviewedAt     DateTime?       @map("reviewed_at") @db.Timestamptz
+
+  rumahTangga  RumahTangga @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
+  diajukanOleh User        @relation("SanggahanDiajukan", fields: [diajukanOlehId], references: [id])
+  ditinjauOleh User?       @relation("SanggahanDitinjau", fields: [ditinjauOlehId], references: [id])
+
+  @@map("sanggahan_request")
 }

@@ -2,7 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsString, IsNumber, IsBoolean, IsUUID, IsArray,
   ValidateNested, IsEnum, IsDateString, Min, Max,
-  Length, ArrayMinSize, IsOptional,
+  Length, ArrayMinSize, IsOptional, Matches,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
@@ -89,4 +89,18 @@ export class CreateRumahTanggaDto {
   @IsUUID()
   @ApiProperty({ required: false })
   periode_id?: string;
+
+  // Wallet penerima — dikumpulkan di sini alih-alih di-derive palsu saat build-merkle
+  // (lihat blockchain.service.ts). 'mandiri' butuh wallet_address; kalau kosong dan
+  // jenis_wallet dikirim 'custodial', backend generate wallet deterministik sebagai
+  // placeholder pendamping desa (lihat rumah-tangga.service.ts create()).
+  @IsOptional()
+  @Matches(/^0x[a-fA-F0-9]{40}$/, { message: 'wallet_address harus alamat Ethereum 0x + 40 hex char' })
+  @ApiProperty({ required: false, example: '0x1234567890abcdef1234567890abcdef12345678' })
+  wallet_address?: string;
+
+  @IsOptional()
+  @IsEnum(['mandiri', 'custodial'] as const)
+  @ApiProperty({ required: false, enum: ['mandiri', 'custodial'] })
+  jenis_wallet?: string;
 }
