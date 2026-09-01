@@ -1,5 +1,8 @@
 generator client {
   provider        = "prisma-client-js"
+  // `native` untuk dev lokal; `linux-musl-openssl-3.0.x` supaya image Alpine
+  // (Docker/CI) memakai engine OpenSSL 3 — bukan default 1.1.x yang hilang.
+  binaryTargets   = ["native", "linux-musl-openssl-3.0.x"]
   // `postgresqlExtensions` dibutuhkan supaya pg_trgm di bawah ikut dibuat oleh
   // `prisma db push` / `migrate` — dipakai index fuzzy-match nama+alamat.
   previewFeatures = ["postgresqlExtensions"]

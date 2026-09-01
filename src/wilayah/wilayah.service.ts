@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, HttpException, HttpStatus } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateWilayahDto } from './dto/create-wilayah.dto';
 
 /** Batas hasil pencarian desa — 83.762 desa, pengguna tidak menggulir ribuan baris. */
 const MAKS_HASIL_CARI = 25;
@@ -136,32 +136,40 @@ export class WilayahService {
   }
 
   /**
-   * Daftarkan satu desa/kelurahan sebagai wilayah kerja program.
+   * Pastikan satu desa/kelurahan punya baris `wilayah`, lalu kembalikan barisnya.
    *
-   * Yang dikirim klien hanya `kode` desa; keempat nama diambil dari
-   * `wilayah_referensi` di sini. Sebelumnya endpoint ini menerima empat kolom
-   * teks bebas, sehingga "Kecamatan Sleman" di bawah "Provinsi Bali" pun
-   * tersimpan tanpa keberatan — dan salah ketik pada nama desa langsung menjadi
-   * wilayah kerja baru yang mirip tapi berbeda dengan yang sudah ada.
+   * Wilayah kerja tidak lagi didaftarkan lebih dulu lewat menu admin tersendiri:
+   * petugas memilih provinsi → kabupaten/kota → kecamatan → desa langsung di
+   * form pendataan, dan barisnya lahir di sini pada penyimpanan pertama untuk
+   * desa tersebut. Yang dikirim klien tetap hanya `kode`; keempat nama diambil
+   * dari `wilayah_referensi` supaya kombinasi mustahil (mis. kecamatan Sleman
+   * di bawah provinsi Bali) dan salah ketik nama desa tidak bisa tersimpan.
+   *
+   * Idempoten — beda dengan endpoint `POST /wilayah` yang digantikannya, desa
+   * yang sudah terdaftar mengembalikan baris lamanya, bukan 409. Pendataan KK
+   * kedua di desa yang sama harus berhasil, bukan ditolak.
    */
-  async create(data: CreateWilayahDto) {
-    const kode = data.kode.trim();
+  async pastikanWilayahKerja(kode: string) {
+    const kodeDesa = kode.trim();
 
-    // Lapis kedua setelah regex di CreateWilayahDto — service ini juga dipanggil
-    // langsung dari seed/skrip, yang tidak melewati ValidationPipe.
-    const segmen = kode.split('.');
+    const sudahAda = await this.prisma.wilayah.findUnique({ where: { kode: kodeDesa } });
+    if (sudahAda) return sudahAda;
+
+    // Lapis kedua setelah regex di CreateRumahTanggaDto — method ini juga
+    // dipanggil importer CSV dan seed/skrip yang tidak melewati ValidationPipe.
+    const segmen = kodeDesa.split('.');
     if (segmen.length !== 4) {
       throw new HttpException(
         {
           code: 'KODE_BUKAN_DESA',
-          message: `Kode '${kode}' bukan kode desa/kelurahan. Wilayah kerja didaftarkan per desa, jadi kodenya harus berbentuk PP.KK.CC.DDDD (mis. 34.04.01.2001).`,
+          message: `Kode '${kodeDesa}' bukan kode desa/kelurahan. Alamat rumah tangga dicatat per desa, jadi kodenya harus berbentuk PP.KK.CC.DDDD (mis. 34.04.01.2001).`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     }
 
     const [p, k, c] = segmen;
-    const jalurKode = [p, `${p}.${k}`, `${p}.${k}.${c}`, kode];
+    const jalurKode = [p, `${p}.${k}`, `${p}.${k}.${c}`, kodeDesa];
     const jalur = new Map(
       (
         await this.prisma.wilayahReferensi.findMany({
@@ -181,25 +189,24 @@ export class WilayahService {
       });
     }
 
-    const sudahAda = await this.prisma.wilayah.findUnique({ where: { kode } });
-    if (sudahAda) {
-      throw new HttpException(
-        {
-          code: 'WILAYAH_SUDAH_TERDAFTAR',
-          message: `${sudahAda.desa}, ${sudahAda.kecamatan}, ${sudahAda.kabupaten} sudah terdaftar sebagai wilayah kerja.`,
+    try {
+      return await this.prisma.wilayah.create({
+        data: {
+          kode: kodeDesa,
+          provinsi: jalur.get(p)!,
+          kabupaten: jalur.get(`${p}.${k}`)!,
+          kecamatan: jalur.get(`${p}.${k}.${c}`)!,
+          desa: jalur.get(kodeDesa)!,
         },
-        HttpStatus.CONFLICT,
-      );
+      });
+    } catch (e) {
+      // Dua petugas boleh mendata desa yang sama pada saat yang sama; yang kalah
+      // balapan memakai baris yang baru saja dibuat lawannya, bukan gagal.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        const lomba = await this.prisma.wilayah.findUnique({ where: { kode: kodeDesa } });
+        if (lomba) return lomba;
+      }
+      throw e;
     }
-
-    return this.prisma.wilayah.create({
-      data: {
-        kode,
-        provinsi: jalur.get(p)!,
-        kabupaten: jalur.get(`${p}.${k}`)!,
-        kecamatan: jalur.get(`${p}.${k}.${c}`)!,
-        desa: jalur.get(kode)!,
-      },
-    });
   }
 }

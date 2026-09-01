@@ -5,6 +5,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { WilayahService } from '../wilayah/wilayah.service';
 import { hashWithPepper, encrypt, normalizeName, jaroWinkler, deriveCustodialWallet } from '../common/crypto.util';
 import { CreateRumahTanggaDto } from './dto/create-rumah-tangga.dto';
 import { VerifikasiDto } from './dto/verifikasi.dto';
@@ -45,7 +46,7 @@ export function resolusiWilayah(baris: Record<string, string>, peta: PetaWilayah
       {
         error: {
           code: 'WILAYAH_TIDAK_DIKENAL',
-          message: `Kode wilayah '${kode}' belum terdaftar sebagai wilayah kerja. Tambahkan dulu lewat menu Wilayah Kerja.`,
+          message: `Kode wilayah '${kode}' tidak ada di referensi Kepmendagri. Pakai kode desa berbentuk PP.KK.CC.DDDD, mis. 34.04.01.2001.`,
         },
       },
       HttpStatus.BAD_REQUEST,
@@ -88,6 +89,7 @@ export class RumahTanggaService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly wilayah: WilayahService,
   ) {}
 
   /**
@@ -103,6 +105,23 @@ export class RumahTanggaService {
    * supaya importer bisa melaporkan alasan gagal per baris.
    */
   async create(dto: CreateRumahTanggaDto, actorId?: string) {
+    // Alamat administratif datang sebagai kode desa Kepmendagri dari form
+    // pendataan; barisnya dibuat sekali per desa di sini (menu "Wilayah Kerja"
+    // yang dulu mendaftarkannya lebih dulu sudah dihapus). `wilayah_id` tetap
+    // diterima untuk importer CSV yang sudah memegang UUID.
+    if (!dto.wilayah_id && !dto.kode_wilayah) {
+      throw new HttpException(
+        {
+          error: {
+            code: 'WILAYAH_TIDAK_DIISI',
+            message: 'Alamat wilayah belum diisi — kirim kode_wilayah (kode desa Kepmendagri) atau wilayah_id.',
+          },
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const wilayahId = dto.wilayah_id ?? (await this.wilayah.pastikanWilayahKerja(dto.kode_wilayah!)).id;
+
     const nikKkHash = hashWithPepper(dto.nik_kepala_keluarga);
     const noKkHash = hashWithPepper(dto.no_kk);
 
@@ -188,7 +207,7 @@ export class RumahTanggaService {
           id: rumahTanggaId,
           nikKkHash: nikKkHash,
           noKkHash: noKkHash,
-          wilayahId: dto.wilayah_id,
+          wilayahId,
           pendapatanPerKapita: dto.pendapatan_per_kapita,
           skorKondisiRumah: dto.skor_kondisi_rumah,
           skorAksesPendidikan: dto.skor_akses_pendidikan,
@@ -421,6 +440,21 @@ export class RumahTanggaService {
   ): Promise<CreateRumahTanggaDto> {
     // Baris kepala jadi sumber kolom rumah tangga; kalau tidak ada, pakai baris pertama.
     const barisKepala = rows.find((r) => (r['hubungan'] ?? '').trim().toLowerCase() === 'kepala') ?? rows[0];
+
+    // Kode desa yang sah tapi belum pernah dipakai tidak lagi bisa didaftarkan
+    // lebih dulu lewat menu admin, jadi importer membuat barisnya sendiri —
+    // aturan `desa` (nama) di resolusiWilayah sengaja TIDAK ikut dilonggarkan:
+    // nama desa tidak unik, dan menebak memindahkan satu KK ke wilayah lain.
+    const kodeCsv = (barisKepala['kode_wilayah'] ?? '').trim();
+    if (kodeCsv && !(barisKepala['wilayah_id'] ?? '').trim() && !peta.byKode.has(kodeCsv)) {
+      const baru = await this.wilayah.pastikanWilayahKerja(kodeCsv);
+      peta.byKode.set(kodeCsv, baru.id);
+      const kunci = baru.desa.toLowerCase();
+      peta.byDesa.set(kunci, [
+        ...(peta.byDesa.get(kunci) ?? []),
+        { id: baru.id, kode: baru.kode, desa: baru.desa, kecamatan: baru.kecamatan, kabupaten: baru.kabupaten },
+      ]);
+    }
 
     const wilayahId = resolusiWilayah(barisKepala, peta);
 

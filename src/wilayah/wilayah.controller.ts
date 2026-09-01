@@ -1,13 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  Query,
-  UseGuards,
-  ParseUUIDPipe,
-} from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards, ParseUUIDPipe } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -20,7 +11,6 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '@prisma/client';
 import { WilayahService } from './wilayah.service';
-import { CreateWilayahDto } from './dto/create-wilayah.dto';
 import { ReferensiQueryDto } from './dto/cari-wilayah.dto';
 
 @ApiTags('Wilayah')
@@ -41,10 +31,10 @@ export class WilayahController {
   // olehnya dan ditolak 400 "bukan UUID" alih-alih sampai ke handler ini.
   @Get('referensi/cari')
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(UserRole.admin)
+  @Roles(UserRole.admin, UserRole.petugas)
   @ApiBearerAuth()
   @ApiOperation({
-    summary: 'Cari desa/kelurahan lintas provinsi (Khusus Admin)',
+    summary: 'Cari desa/kelurahan lintas provinsi (Admin & Petugas)',
     description:
       'Jalan pintas untuk pengguna yang tahu nama desanya tapi belum tentu kabupatennya. ' +
       'Hasil selalu memuat jalur lengkap karena nama desa tidak unik di Indonesia.',
@@ -56,13 +46,14 @@ export class WilayahController {
 
   @Get('referensi')
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(UserRole.admin)
+  @Roles(UserRole.admin, UserRole.petugas)
   @ApiBearerAuth()
   @ApiOperation({
-    summary: 'Referensi wilayah administratif Indonesia, satu tingkat (Khusus Admin)',
+    summary: 'Referensi wilayah administratif Indonesia, satu tingkat (Admin & Petugas)',
     description:
       'Kepmendagri No. 300.2.2-2138 Tahun 2025: 38 provinsi, 514 kabupaten/kota, ' +
-      '7.285 kecamatan, 83.762 desa/kelurahan. Dipakai dropdown bertingkat di form wilayah.',
+      '7.285 kecamatan, 83.762 desa/kelurahan. Dipakai dropdown alamat bertingkat ' +
+      'di form pendataan KK — karena itu petugas ikut diberi akses, bukan admin saja.',
   })
   @ApiResponse({ status: 200, description: 'Daftar anak dari kode induk' })
   @ApiResponse({ status: 404, description: 'Kode induk tidak ada di referensi' })
@@ -76,22 +67,5 @@ export class WilayahController {
   @ApiResponse({ status: 404, description: 'Wilayah tidak ditemukan' })
   async findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.wilayahService.findOne(id);
-  }
-
-  @Post()
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(UserRole.admin)
-  @ApiBearerAuth()
-  @ApiOperation({
-    summary: 'Daftarkan desa/kelurahan sebagai wilayah kerja (Khusus Admin)',
-    description: 'Kirim kode desa dari GET /wilayah/referensi; namanya diambil server dari referensi.',
-  })
-  @ApiResponse({ status: 201, description: 'Wilayah berhasil didaftarkan' })
-  @ApiResponse({ status: 401, description: 'Tidak terautentikasi' })
-  @ApiResponse({ status: 403, description: 'Akses ditolak' })
-  @ApiResponse({ status: 404, description: 'Kode tidak ada di referensi wilayah' })
-  @ApiResponse({ status: 409, description: 'Desa sudah terdaftar sebagai wilayah kerja' })
-  async create(@Body() createWilayahDto: CreateWilayahDto) {
-    return this.wilayahService.create(createWilayahDto);
   }
 }
