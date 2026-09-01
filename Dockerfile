@@ -9,8 +9,14 @@ RUN apk add --no-cache openssl
 
 # Install dependencies
 FROM base AS deps
+# Toolchain untuk meng-compile addon native `bcrypt` (tidak ada prebuild musl).
+# Hanya ada di stage `deps`, tidak ikut ke image `runner`.
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json* ./
-RUN npm ci --ignore-scripts
+# TANPA `--ignore-scripts`: install script `bcrypt` harus jalan supaya
+# `bcrypt_lib.node` ter-build. `--ignore-scripts` bikin binding-nya hilang dan
+# aplikasi mati "Cannot find module .../bcrypt_lib.node" saat start.
+RUN npm ci
 COPY prisma ./prisma/
 RUN npx prisma generate
 
