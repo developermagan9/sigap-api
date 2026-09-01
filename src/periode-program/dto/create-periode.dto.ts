@@ -34,4 +34,17 @@ export class CreatePeriodeDto {
   @IsNumber()
   @IsOptional()
   nominal_dasar?: number;
+
+  /**
+   * Skema `berjenjang` saja — pengali nominal per label cluster, mis.
+   * `{ "Sangat Rentan": 1.25, "Rentan": 1.0, "Cukup Mampu": 0.75, "Mampu": 0.5 }`
+   * (05-Algorithm-Design.md §5.2-B). Sebelumnya kolom ini hanya bisa terisi
+   * sebagai efek samping `POST /periode-program/:id/run-alokasi`, sehingga
+   * admin tidak bisa menyetelnya lebih dulu — di sini dia menjadi bagian
+   * pengaturan periode yang sama dengan nominal dasar dan skema alokasi.
+   */
+  @ApiProperty({ required: false, example: { 'Sangat Rentan': 1.25, Rentan: 1.0, 'Cukup Mampu': 0.75, Mampu: 0.5 } })
+  @IsObject()
+  @IsOptional()
+  faktor_cluster?: Record<string, number>;
 }

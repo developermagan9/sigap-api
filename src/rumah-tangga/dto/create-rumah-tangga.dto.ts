@@ -2,7 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsString, IsNumber, IsBoolean, IsUUID, IsArray,
   ValidateNested, IsEnum, IsDateString, Min, Max,
-  Length, ArrayMinSize, IsOptional, Matches,
+  Length, ArrayMinSize, IsOptional, Matches, ValidateIf,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
@@ -52,9 +52,28 @@ export class CreateRumahTanggaDto {
   @IsString()
   alamat_detail: string;
 
-  @ApiProperty()
+  /**
+   * Alamat administratif rumah tangga: kirim `kode_wilayah` (kode desa
+   * Kepmendagri) ATAU `wilayah_id` (UUID baris wilayah yang sudah ada).
+   *
+   * `kode_wilayah` adalah jalur utama sejak menu "Wilayah Kerja" dihapus —
+   * petugas memilih provinsi → kabupaten/kota → kecamatan → desa langsung di
+   * form pendataan, dan baris `wilayah`-nya dibuat server pada penyimpanan
+   * pertama untuk desa itu (WilayahService.pastikanWilayahKerja). `wilayah_id`
+   * dipertahankan untuk importer CSV dan integrasi lama yang sudah memegang UUID.
+   */
+  @ApiProperty({ required: false, example: '34.04.01.2001', description: 'Kode desa Kepmendagri PP.KK.CC.DDDD' })
+  @ValidateIf((o: CreateRumahTanggaDto) => !o.wilayah_id)
+  @IsString()
+  @Matches(/^\d{2}\.\d{2}\.\d{2}\.\d{4}$/, {
+    message: 'kode_wilayah harus berbentuk PP.KK.CC.DDDD, mis. 34.04.01.2001',
+  })
+  kode_wilayah?: string;
+
+  @ApiProperty({ required: false, description: 'UUID wilayah yang sudah terdaftar; alternatif dari kode_wilayah' })
+  @ValidateIf((o: CreateRumahTanggaDto) => !o.kode_wilayah)
   @IsUUID()
-  wilayah_id: string;
+  wilayah_id?: string;
 
   @ApiProperty({ example: 650000 })
   @IsNumber()

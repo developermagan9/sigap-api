@@ -48,6 +48,7 @@ export class PeriodeProgramService {
         bobotKriteria: (dto as any).bobot_kriteria,
         skemaAlokasi: ((dto as any).skema_alokasi as SkemaAlokasi) || 'flat',
         nominalDasar: (dto as any).nominal_dasar ?? 500000,
+        faktorCluster: (dto as any).faktor_cluster ?? undefined,
         status: 'draft',
       },
     });
@@ -184,6 +185,7 @@ export class PeriodeProgramService {
     if ((dto as any).bobot_kriteria !== undefined) updateData.bobotKriteria = (dto as any).bobot_kriteria;
     if ((dto as any).skema_alokasi !== undefined) updateData.skemaAlokasi = (dto as any).skema_alokasi as SkemaAlokasi;
     if ((dto as any).nominal_dasar !== undefined) updateData.nominalDasar = (dto as any).nominal_dasar;
+    if ((dto as any).faktor_cluster !== undefined) updateData.faktorCluster = (dto as any).faktor_cluster;
 
     const updated = await (this.prisma as any).periodeProgram.update({
       where: { id },
