@@ -1,10 +1,14 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // `postgresqlExtensions` dibutuhkan supaya pg_trgm di bawah ikut dibuat oleh
+  // `prisma db push` / `migrate` — dipakai index fuzzy-match nama+alamat.
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pg_trgm]
 }
 
 // ─── Enums ───────────────────────────────────────────
@@ -70,8 +74,18 @@ enum WalletType {
 
 // ─── Models ──────────────────────────────────────────
 
+/// Wilayah KERJA program — subset desa/kelurahan yang benar-benar didata.
+/// Sengaja bukan salinan seluruh Indonesia: `user.wilayah_id` memakai tabel ini
+/// sebagai batas kewenangan, dan dropdown pendataan petugas memilih dari sini.
+/// Barisnya dibuat dengan memilih dari `wilayah_referensi` (lihat WilayahService.create).
 model Wilayah {
   id        String @id @default(uuid()) @db.Uuid
+  /// Kode Kepmendagri tingkat desa (`PP.KK.CC.DDDD`) dari `wilayah_referensi`.
+  /// Unik supaya satu desa tidak bisa terdaftar dua kali sebagai wilayah kerja —
+  /// nama desa TIDAK unik di Indonesia (27.544 desa memakai nama yang juga
+  /// dipakai desa lain; "Sidomulyo" saja ada 98), jadi nama tidak bisa jadi kunci.
+  /// Nullable untuk baris lama yang dibuat sebelum referensi wilayah ada.
+  kode      String? @unique @db.VarChar(13)
   provinsi  String @db.VarChar(100)
   kabupaten String @db.VarChar(100)
   kecamatan String @db.VarChar(100)
@@ -81,6 +95,25 @@ model Wilayah {
   users       User[]
 
   @@map("wilayah")
+}
+
+/// Referensi wilayah administratif Indonesia sesuai Kepmendagri 300.2.2-2138/2025.
+/// READ-ONLY bagi aplikasi: diisi `npm run wilayah:seed` dari
+/// `prisma/data/wilayah-indonesia.csv`, tidak pernah ditulis lewat API.
+model WilayahReferensi {
+  /// `34` (provinsi), `34.04` (kab/kota), `34.04.01` (kecamatan), `34.04.01.2001` (desa).
+  kode      String  @id @db.VarChar(13)
+  nama      String  @db.VarChar(100)
+  /// 1 provinsi, 2 kabupaten/kota, 3 kecamatan, 4 desa/kelurahan.
+  level     Int     @db.SmallInt
+  /// Kode induk = kode ini dikurangi satu segmen terakhir; `null` untuk provinsi.
+  indukKode String? @map("induk_kode") @db.VarChar(13)
+
+  /// Menopang query cascade `WHERE induk_kode = ? ORDER BY nama`.
+  @@index([indukKode, nama])
+  /// Menopang pencarian desa lintas provinsi `WHERE level = 4 AND nama ILIKE ?`.
+  @@index([level, nama])
+  @@map("wilayah_referensi")
 }
 
 model User {
@@ -105,8 +138,8 @@ model User {
 
 model RumahTangga {
   id                      String           @id @default(uuid()) @db.Uuid
-  nikKkHash               String           @unique @map("nik_kk_hash") @db.VarChar(64)
-  noKkHash                String           @unique @map("no_kk_hash") @db.VarChar(64)
+  nikKkHash               String           @map("nik_kk_hash") @db.VarChar(64)
+  noKkHash                String           @map("no_kk_hash") @db.VarChar(64)
   wilayahId               String           @map("wilayah_id") @db.Uuid
   pendapatanPerKapita     Decimal          @map("pendapatan_per_kapita") @db.Decimal(15, 2)
   jumlahTanggungan        Int              @default(0) @map("jumlah_tanggungan")
@@ -124,17 +157,32 @@ model RumahTangga {
   // fallback custodial deterministik tetap ada di blockchain.service.ts bila kosong.
   walletAddress           String?          @map("wallet_address") @db.VarChar(42)
   jenisWallet             WalletType?      @map("jenis_wallet")
+  // Hasil assignment K-Means terakhir untuk baris ini (05-Algorithm-Design.md §3).
+  // Disimpan saat `run-clustering` supaya `run-topsis` tidak perlu menjalankan
+  // ulang K-Means di dalam loop per cluster — perhitungan ulang itu sempat
+  // menghasilkan assignment yang berbeda karena urutan baris tidak dijamin.
+  // `clusterIndex` = peringkat kerentanan (0 = Sangat Rentan), sama dengan
+  // ClusterResult.clusterIndex; `clusterResultId` menunjuk baris agregatnya.
+  clusterIndex            Int?             @map("cluster_index")
+  clusterResultId         String?          @map("cluster_result_id") @db.Uuid
   createdAt               DateTime         @default(now()) @map("created_at") @db.Timestamptz
   updatedAt               DateTime         @updatedAt @map("updated_at") @db.Timestamptz
 
   wilayah             Wilayah              @relation(fields: [wilayahId], references: [id])
   periode             PeriodeProgram?      @relation(fields: [periodeId], references: [id])
+  clusterResult       ClusterResult?       @relation(fields: [clusterResultId], references: [id], onDelete: SetNull)
   pii                 RumahTanggaPii?
   anggota             AnggotaKeluarga[]
   rankingResults      RankingResult[]
   disbursementRecords DisbursementRecord[]
   sanggahanRequests   SanggahanRequest[]
 
+  // Dedup NIK/No.KK keras "per periode program" (03-Data-Model.md §1.1) — satu KK
+  // yang sama BOLEH terdaftar lagi di periode berikutnya, tapi tidak dua kali di
+  // periode yang sama. Baris tanpa periode_id (data lepas/test) tidak di-dedup
+  // karena NULL dianggap distinct oleh Postgres.
+  @@unique([periodeId, nikKkHash])
+  @@unique([periodeId, noKkHash])
   @@map("rumah_tangga")
 }
 
@@ -151,13 +199,19 @@ model RumahTanggaPii {
 
   rumahTangga RumahTangga @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
 
+  // Index trigram untuk prefilter kandidat duplikat. Tanpa ini setiap insert
+  // menarik SELURUH tabel ke memori lalu menghitung Jaro-Winkler satu per satu
+  // (O(n) per insert). Dengan index ini kandidat disaring dulu lewat operator
+  // similarity Postgres, Jaro-Winkler cuma jalan di segelintir baris teratas.
+  @@index([namaNormalized(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([alamatNormalized(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("rumah_tangga_pii")
 }
 
 model AnggotaKeluarga {
   id                String           @id @default(uuid()) @db.Uuid
   rumahTanggaId     String           @map("rumah_tangga_id") @db.Uuid
-  nikHash           String           @unique @map("nik_hash") @db.VarChar(64)
+  nikHash           String           @map("nik_hash") @db.VarChar(64)
   nikEnc            Bytes            @map("nik_enc")
   namaEnc           Bytes            @map("nama_enc")
   hubungan          HubunganKeluarga
@@ -167,6 +221,9 @@ model AnggotaKeluarga {
 
   rumahTangga RumahTangga @relation(fields: [rumahTanggaId], references: [id], onDelete: Cascade)
 
+  // Dedup NIK anggota juga discope per periode (lewat relasi rumahTangga.periodeId
+  // di rumah-tangga.service.ts). Index non-unik untuk mempercepat lookup itu.
+  @@index([nikHash])
   @@map("anggota_keluarga")
 }
 
@@ -184,6 +241,9 @@ model PeriodeProgram {
   kuotaPenerima    Int?          @map("kuota_penerima")
   totalAlokasi     Decimal?      @map("total_alokasi") @db.Decimal(18, 2)
   sisaAnggaran     Decimal?      @map("sisa_anggaran") @db.Decimal(18, 2)
+  // Skor silhouette dari run clustering terakhir (validasi pemilihan k,
+  // 05-Algorithm-Design.md §3.2). Nullable: baru terisi setelah clustering jalan.
+  silhouetteScore  Decimal?      @map("silhouette_score") @db.Decimal(6, 5)
   merkleRoot       String?       @map("merkle_root") @db.VarChar(66)
   contractAddress  String?       @map("contract_address") @db.VarChar(42)
   txHash           String?       @map("tx_hash") @db.VarChar(66)
@@ -209,6 +269,7 @@ model ClusterResult {
 
   periode        PeriodeProgram  @relation(fields: [periodeId], references: [id], onDelete: Cascade)
   rankingResults RankingResult[]
+  rumahTangga    RumahTangga[]
 
   @@unique([periodeId, clusterIndex])
   @@map("cluster_result")

@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsArray, IsObject, IsString } from 'class-validator';
+import { IsNumber, IsOptional, IsArray, IsObject, IsString, IsEnum, Min } from 'class-validator';
 
 export class RunClusteringDto {
   @IsNumber()
@@ -21,7 +21,7 @@ export class RunTopsisDto {
 }
 
 export class RunAlokasiDto {
-  @IsString()
+  @IsEnum(['flat', 'berjenjang', 'proporsional'] as const)
   skemaAlokasi: string;
 
   @IsNumber()
@@ -29,6 +29,25 @@ export class RunAlokasiDto {
 
   @IsNumber()
   biayaOperasional: number;
+
+  /** Skema `berjenjang` saja — pengali nominal per label cluster, mis.
+   *  `{ "Sangat Rentan": 1.25, "Rentan": 1.0 }` (05-Algorithm-Design.md §5.2-B).
+   *  Kalau tidak dikirim, dipakai `periode_program.faktor_cluster`, lalu default sistem. */
+  @IsObject()
+  @IsOptional()
+  faktorCluster?: Record<string, number>;
+
+  /** Skema `proporsional` saja — batas bawah/atas nominal per penerima (§5.2-C).
+   *  Default: 0.5x dan 2x nominalDasar. */
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  nominalMin?: number;
+
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  nominalMax?: number;
 }
 
 export class FinalizeRankingDto {

@@ -2,8 +2,26 @@ import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MerkleService, MerkleLeaf } from './merkle.service';
+import { PeriodeProgramService } from '../periode-program/periode-program.service';
 import { keccak256, toUtf8Bytes, Contract, Wallet, JsonRpcProvider } from 'ethers';
 import { deriveCustodialWallet } from '../common/crypto.util';
+
+/** Basis URL block explorer; jaringan bisa berganti, jadi tidak di-hardcode. */
+function explorerBase(): string {
+  return process.env.EXPLORER_BASE_URL || 'https://amoy.polygonscan.com';
+}
+
+/**
+ * Alamat kontrak yang benar-benar bisa dibuka di explorer.
+ *
+ * Database yang sudah ada bisa memuat nilai sampah dari versi sebelumnya —
+ * `submit-onchain` lama menyimpan `process.env.REGISTRY_CONTRACT_ADDRESS` apa
+ * adanya, dan di `.env.example` isinya literal `"0x..."`. Baris seperti itu tidak
+ * boleh diperlakukan sebagai alamat sungguhan hanya karena kolomnya tidak NULL.
+ */
+export function alamatKontrakValid(alamat: string | null | undefined): string | null {
+  return alamat && /^0x[0-9a-fA-F]{40}$/.test(alamat) ? alamat : null;
+}
 
 // Cuma fragmen yang benar-benar dipanggil dari sini — ABI penuh ada di paket
 // sigap-contracts (repo terpisah), sengaja tidak diimpor supaya sigap-api tidak
@@ -20,6 +38,7 @@ export class BlockchainService {
     private prisma: PrismaService,
     private audit: AuditService,
     private merkle: MerkleService,
+    private periodeProgramService: PeriodeProgramService,
   ) {}
 
   /**
@@ -130,7 +149,42 @@ export class BlockchainService {
     // Create/update disbursement records. `reference` (mis. REC-0231) dibuat
     // sekali saat record pertama kali ada dan tidak pernah diubah lagi —
     // ini identitas publik yang dipakai warga untuk cek status, jadi harus stabil.
-    let refCounter = await this.prisma.disbursementRecord.count();
+    //
+    // Nomor urut diturunkan dari `reference` numerik TERTINGGI yang sudah ada,
+    // bukan dari count() — count() bisa turun kalau record periode lain dihapus,
+    // dan menghasilkan REC-XXXX yang bertabrakan dengan yang masih ada (kolom
+    // `reference` unik -> insert gagal 500). Max + increment selalu monoton naik.
+    // Buang record penerima yang TIDAK lagi terpilih pada alokasi terbaru.
+    // Tanpa ini, menjalankan ulang alokasi dengan kuota lebih kecil menyisakan
+    // record lama, sehingga jumlah penerima di portal publik tidak sama dengan
+    // `kuota_penerima` dan Σ amount tidak lagi cocok dengan `total_alokasi`.
+    // Record yang sudah `claimed` TIDAK pernah dihapus — itu jejak transaksi
+    // sungguhan; kalau sampai ada yang keluar dari daftar, prosesnya dihentikan.
+    const idsTerpilih = leaves.map((l) => l.rumahTanggaId);
+    const usangTerklaim = await this.prisma.disbursementRecord.findMany({
+      where: { periodeId, rumahTanggaId: { notIn: idsTerpilih }, status: { not: 'pending' } },
+      select: { reference: true },
+    });
+    if (usangTerklaim.length > 0) {
+      throw new HttpException(
+        {
+          code: 'PENERIMA_TERKLAIM_HILANG_DARI_DAFTAR',
+          message: `${usangTerklaim.length} penerima yang dananya sudah cair tidak lagi ada di daftar alokasi terbaru (${usangTerklaim
+            .map((r) => r.reference)
+            .join(', ')}). Kembalikan parameter alokasi atau selesaikan lewat koreksi manual — jangan bangun ulang Merkle root di atas data yang tidak konsisten.`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    await this.prisma.disbursementRecord.deleteMany({
+      where: { periodeId, rumahTanggaId: { notIn: idsTerpilih }, status: 'pending' },
+    });
+
+    const semuaRef = await this.prisma.disbursementRecord.findMany({ select: { reference: true } });
+    let refCounter = semuaRef.reduce((max, r) => {
+      const n = parseInt(r.reference.replace(/^REC-/, ''), 10);
+      return Number.isFinite(n) && n > max ? n : max;
+    }, 0);
 
     for (const leaf of leaves) {
       const rt = rankings.find((r) => r.rumahTanggaId === leaf.rumahTanggaId);
@@ -154,6 +208,12 @@ export class BlockchainService {
           status: 'pending',
         },
         update: {
+          // Nominal/wallet ikut diperbarui: alokasi bisa dijalankan ulang dengan
+          // skema atau nominal berbeda, dan record harus mencerminkan leaf yang
+          // benar-benar masuk Merkle root. `reference` sengaja tidak ikut diubah.
+          walletAddress: leaf.recipient,
+          jenisWallet: leaf.jenisWallet,
+          amount: Number(leaf.amount),
           merkleLeafHash: leaf.leafHash,
         },
       });
@@ -244,7 +304,10 @@ export class BlockchainService {
       nik_hash: nikHash,
       proof,
       sudah_diklaim: disbursement.status === 'claimed',
-      contract_address: periode?.contractAddress || process.env.DISBURSEMENT_CONTRACT_ADDRESS || '0x...',
+      contract_address:
+        alamatKontrakValid(periode?.contractAddress) ??
+        alamatKontrakValid(process.env.DISBURSEMENT_CONTRACT_ADDRESS) ??
+        null,
     };
   }
 
@@ -271,9 +334,21 @@ export class BlockchainService {
     // proof terhadap periodeId numerik ini, bukan UUID string-nya.
     const periodeIdNum = parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
 
+    // Periode yang sudah `disbursed` tidak boleh disubmit ulang: root sudah
+    // terkunci on-chain, dan menimpa tx_hash akan menghapus jejak transaksi asli.
+    if (periode.status === 'disbursed' && periode.txHash) {
+      throw new HttpException(
+        {
+          code: 'SUDAH_DISUBMIT',
+          message: `Periode ini sudah pernah disubmit on-chain (tx ${periode.txHash}). Membangun ulang akan menimpa jejak transaksi yang sudah tercatat.`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
     const chain = this.getChainConfig();
     let txHash: string;
-    let contractAddress: string;
+    let contractAddress: string | null;
     let simulated: boolean;
 
     if (chain) {
@@ -299,18 +374,32 @@ export class BlockchainService {
       // 07-Security-Privacy-Ethics.md §7 — dinyatakan terbuka sebagai simulasi, bukan
       // disamarkan sebagai transaksi nyata.
       txHash = '0x' + keccak256(toUtf8Bytes(`tx-${periodeId}-${Date.now()}`)).substring(2);
-      contractAddress = process.env.REGISTRY_CONTRACT_ADDRESS || '0x7a1c9F4b2E8d3A5c6B0f1D8e4C2a9B7d3E5f0A16';
+      // JANGAN menyimpan alamat kontrak apa pun saat simulasi. Sebelumnya di sini
+      // dipakai `process.env.REGISTRY_CONTRACT_ADDRESS` (yang di .env masih berisi
+      // literal "0x...") dengan cadangan sebuah alamat contoh yang di-hardcode —
+      // keduanya lalu tersimpan sebagai `contract_address` dan ditampilkan ke publik
+      // sebagai tautan block explorer. Tautan itu mengarah ke alamat yang tidak ada
+      // hubungannya dengan program ini: persis "menyamarkan simulasi sebagai transaksi
+      // nyata" yang dilarang 07-Security-Privacy-Ethics.md §7 — dan yang justru
+      // diklaim tidak dilakukan oleh komentar di blok ini sebelumnya.
+      // `null` membuat UI menampilkan "Kontrak belum terdaftar di explorer".
+      contractAddress = null;
       simulated = true;
     }
 
     await this.prisma.periodeProgram.update({
       where: { id: periodeId },
-      data: {
-        txHash,
-        contractAddress,
-        status: 'disbursed',
-      },
+      data: { txHash, contractAddress },
     });
+
+    // Perubahan status dirutekan lewat state machine resmi, bukan ditulis langsung.
+    // Sebelumnya `status: 'disbursed'` di-set di update di atas, melewati
+    // `updateStatus()` sepenuhnya — sama persis dengan bug yang sudah diperbaiki di
+    // `finalizeRanking()`. Akibatnya submit-onchain bisa dipanggil berulang pada
+    // periode yang sudah `disbursed` dan menimpa `tx_hash` transaksi sebelumnya.
+    if (periode.status !== 'disbursed') {
+      await this.periodeProgramService.updateStatus(periodeId, 'disbursed', actorId);
+    }
 
     await this.audit.log({
       actorId,
@@ -363,7 +452,11 @@ export class BlockchainService {
       total_recipients: totalRecipients,
       total_claimed: totalClaimed,
       total_pending: totalRecipients - totalClaimed,
-      explorer_url: `https://amoy.polygonscan.com/address/${periode.contractAddress || '0x...'}`,
+      // Tanpa alamat kontrak (periode masih mode simulasi), tidak ada URL explorer
+      // yang bermakna — `null` supaya UI tidak memasang tautan yang pasti mati.
+      explorer_url: alamatKontrakValid(periode.contractAddress)
+        ? `${explorerBase()}/address/${periode.contractAddress}`
+        : null,
     };
   }
 }

@@ -3,8 +3,13 @@ import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { validateEnv } from './common/env.validation';
 
 async function bootstrap() {
+  // Dijalankan sebelum apa pun dilayani: berjalan dengan pepper/kunci/JWT secret
+  // bawaan yang tertulis di source code jauh lebih berbahaya daripada gagal start.
+  validateEnv();
+
   const app = await NestFactory.create(AppModule);
 
   // Global prefix

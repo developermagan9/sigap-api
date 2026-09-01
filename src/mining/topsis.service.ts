@@ -37,14 +37,18 @@ export class TopsisService {
     const numRows = matrix.length;
     
     // Check single row edge case
+    // Cluster prioritas berisi 1 KK (edge case §4.5): TOPSIS pada n=1 selalu
+    // menghasilkan C = 0.5; lewati perhitungan, tapi tetap penuhi invarian Σ = 1
+    // dengan komposisi rata supaya konsumen breakdown tidak perlu kasus khusus.
     if (numRows === 1) {
+      const rata = numCols > 0 ? 1 / numCols : 0;
       const breakdown: Record<string, BreakdownItem> = {};
       for (let j = 0; j < numCols; j++) {
         breakdown[kriteria[j].key] = {
           nilaiAsli: matrix[0][j],
           terbobot: 0,
-          kontribusi: 0,
-          kesenjangan: 0,
+          kontribusi: rata,
+          kesenjangan: rata,
         };
       }
       return [{ index: 0, skor: 0.5, dPlus: 0, dMinus: 0, breakdown }];
@@ -126,13 +130,22 @@ export class TopsisService {
       let skor = dMinus / (dPlus + dMinus);
       if (isNaN(skor) || (dPlus + dMinus === 0)) skor = 0.5;
 
+      // Invarian 05-Algorithm-Design.md §4.4: Σ_j kontribusi_ij = Σ_j kesenjangan_ij = 1.
+      //
+      // Pembaginya bisa nol kalau baris ini PERSIS sama dengan solusi ideal negatif
+      // (D⁻ = 0, alternatif paling tidak prioritas) atau ideal positif (D⁺ = 0).
+      // Komposisi vektor nol tidak terdefinisi secara matematis, jadi dipakai
+      // pembagian rata 1/m — artinya "tidak ada satu kriteria pun yang membedakan
+      // rumah tangga ini dari kondisi acuan". Mengembalikan 0 akan melanggar
+      // invarian Σ = 1 dan membuat stacked bar di dashboard tampil kosong.
+      const rata = 1 / numCols;
       const breakdown: Record<string, BreakdownItem> = {};
       for (let j = 0; j < numCols; j++) {
         breakdown[kriteria[j].key] = {
           nilaiAsli: matrix[i][j],
           terbobot: v[i][j],
-          kontribusi: sumKontribusi[i] === 0 ? 0 : rawKontribusi[i][j] / sumKontribusi[i],
-          kesenjangan: sumKesenjangan[i] === 0 ? 0 : rawKesenjangan[i][j] / sumKesenjangan[i],
+          kontribusi: sumKontribusi[i] === 0 ? rata : rawKontribusi[i][j] / sumKontribusi[i],
+          kesenjangan: sumKesenjangan[i] === 0 ? rata : rawKesenjangan[i][j] / sumKesenjangan[i],
         };
       }
 

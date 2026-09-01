@@ -1,15 +1,63 @@
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 
-const PEPPER = process.env.SYSTEM_PEPPER || 'default-pepper-change-me';
-const ENC_KEY = process.env.DB_ENCRYPTION_KEY || '0'.repeat(64);
 const ALGORITHM = 'aes-256-cbc';
+
+/**
+ * Pepper & kunci enkripsi dibaca **saat dipakai**, bukan saat modul di-import.
+ *
+ * Sebelumnya keduanya konstanta tingkat modul. Modul ini di-import lewat rantai
+ * `app.module -> rumah-tangga.module -> rumah-tangga.service -> crypto.util`,
+ * yang seluruhnya dievaluasi sebelum `ConfigModule.forRoot()` benar-benar
+ * dipanggil di array `imports` AppModule. Hari ini itu kebetulan tidak jadi
+ * masalah karena `@nestjs/config` memuat `.env` saat paketnya di-import (dan
+ * import-nya kebetulan berada di atas import modul-modul lain di app.module.ts),
+ * tapi urutan sekonyol itu tidak boleh jadi hal yang menentukan apakah seluruh
+ * NIK di-hash dengan pepper asli atau dengan string yang tertulis di source code.
+ * Membacanya lazy membuat urutan import tidak lagi relevan.
+ *
+ * Nilainya di-cache setelah pembacaan pertama supaya tidak berubah di tengah
+ * jalan — pepper yang berganti akan membuat seluruh hash lama tidak cocok lagi.
+ */
+let pepperCache: string | null = null;
+let encKeyCache: Buffer | null = null;
+
+function pepper(): string {
+  if (pepperCache === null) {
+    pepperCache = process.env.SYSTEM_PEPPER || 'default-pepper-change-me';
+  }
+  return pepperCache;
+}
+
+function encKey(): Buffer {
+  if (encKeyCache === null) {
+    const hex = process.env.DB_ENCRYPTION_KEY || '0'.repeat(64);
+    const buf = Buffer.from(hex, 'hex');
+    if (buf.length !== 32) {
+      // Kunci sepanjang salah akan membuat createCipheriv melempar error yang
+      // tidak menyebut penyebabnya. Lebih baik gagal dengan pesan yang menunjuk
+      // langsung ke variabel yang salah.
+      throw new Error(
+        `DB_ENCRYPTION_KEY harus 64 karakter hex (32 byte), yang terbaca ${buf.length} byte. ` +
+          'Buat dengan: openssl rand -hex 32 — lihat docs/16-Konfigurasi-Kredensial.md',
+      );
+    }
+    encKeyCache = buf;
+  }
+  return encKeyCache;
+}
+
+/** Hanya untuk test: buang cache supaya perubahan env ikut terbaca. */
+export function resetKunciCache(): void {
+  pepperCache = null;
+  encKeyCache = null;
+}
 
 /**
  * SHA-256 hash with system pepper.
  * Used for NIK, No. KK hashing to prevent rainbow table attacks on 16-digit NIK space.
  */
 export function hashWithPepper(value: string): string {
-  return createHash('sha256').update(value + PEPPER).digest('hex');
+  return createHash('sha256').update(value + pepper()).digest('hex');
 }
 
 /**
@@ -24,7 +72,7 @@ export function hashWithPepper(value: string): string {
  * build-merkle tetap punya `recipient` yang valid secara format untuk demo/testing.
  */
 export function deriveCustodialWallet(seed: string): string {
-  const hash = createHash('sha256').update(`custodial:${seed}:${PEPPER}`).digest('hex');
+  const hash = createHash('sha256').update(`custodial:${seed}:${pepper()}`).digest('hex');
   return '0x' + hash.slice(0, 40);
 }
 
@@ -33,7 +81,7 @@ export function deriveCustodialWallet(seed: string): string {
  * Returns IV prepended to ciphertext as a single Buffer.
  */
 export function encrypt(plaintext: string): Buffer {
-  const key = Buffer.from(ENC_KEY, 'hex');
+  const key = encKey();
   const iv = randomBytes(16);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
@@ -44,7 +92,7 @@ export function encrypt(plaintext: string): Buffer {
  * AES-256-CBC decrypt for PII retrieval.
  */
 export function decrypt(data: Buffer): string {
-  const key = Buffer.from(ENC_KEY, 'hex');
+  const key = encKey();
   const iv = data.subarray(0, 16);
   const encrypted = data.subarray(16);
   const decipher = createDecipheriv(ALGORITHM, key, iv);

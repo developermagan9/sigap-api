@@ -22,13 +22,13 @@ export class SanggahanController {
 
   @Get('sanggahan')
   @Roles('verifikator', 'admin')
-  findAll(@Query('status') status?: string) {
-    return this.sanggahanService.findAll(status);
+  findAll(@Request() req: any, @Query('status') status?: string) {
+    return this.sanggahanService.findAll(status, req.user);
   }
 
   @Patch('sanggahan/:id/review')
   @Roles('verifikator', 'admin')
   review(@Param('id') id: string, @Body() dto: ReviewSanggahanDto, @Request() req: any) {
-    return this.sanggahanService.review(id, dto, req.user?.id);
+    return this.sanggahanService.review(id, dto, req.user?.id, req.user);
   }
 }

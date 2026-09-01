@@ -60,6 +60,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
       case 404: return 'TIDAK_DITEMUKAN';
       case 409: return 'KONFLIK_DATA';
       case 422: return 'TRANSISI_TIDAK_VALID';
+      case 429: return 'TERLALU_BANYAK_PERMINTAAN';
+      case 501: return 'BELUM_DIIMPLEMENTASIKAN';
       default: return 'INTERNAL_ERROR';
     }
   }

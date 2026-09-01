@@ -45,7 +45,11 @@ export class MiningController {
     @Param('id') periodeId: string,
     @Body() dto: RunAlokasiDto
   ) {
-    return this.miningService.runAlokasi(periodeId, dto.skemaAlokasi, dto.nominalDasar, dto.biayaOperasional);
+    return this.miningService.runAlokasi(periodeId, dto.skemaAlokasi, dto.nominalDasar, dto.biayaOperasional, {
+      faktorCluster: dto.faktorCluster,
+      nominalMin: dto.nominalMin,
+      nominalMax: dto.nominalMax,
+    });
   }
 
   @Post(':id/finalize-ranking')

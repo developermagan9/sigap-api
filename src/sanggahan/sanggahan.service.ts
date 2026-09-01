@@ -57,9 +57,19 @@ export class SanggahanService {
     return request;
   }
 
-  async findAll(status?: string) {
+  async findAll(status?: string, user?: { role?: string; wilayahId?: string | null }) {
+    // Scoping wilayah, sejalan dengan RumahTanggaService.findAll(): verifikator
+    // hanya melihat sanggahan dari wilayah kerjanya sendiri. Tanpa ini, daftar
+    // sanggahan jadi jalan memutar untuk melihat (dan memutuskan) data wilayah
+    // lain — persis lubang yang sudah ditutup di daftar rumah tangga.
+    const where: any = {};
+    if (status) where.status = status;
+    if (user && user.role !== 'admin') {
+      where.rumahTangga = { wilayahId: user.wilayahId ?? '__no_wilayah__' };
+    }
+
     return this.prisma.sanggahanRequest.findMany({
-      where: status ? { status: status as any } : undefined,
+      where,
       include: {
         rumahTangga: { select: { id: true, wilayahId: true, statusVerifikasi: true, periodeId: true } },
         diajukanOleh: { select: { id: true, nama: true, username: true, role: true } },
@@ -69,7 +79,12 @@ export class SanggahanService {
     });
   }
 
-  async review(id: string, dto: ReviewSanggahanDto, actorId: string) {
+  async review(
+    id: string,
+    dto: ReviewSanggahanDto,
+    actorId: string,
+    user?: { role?: string; wilayahId?: string | null },
+  ) {
     const request = await this.prisma.sanggahanRequest.findUnique({
       where: { id },
       include: { rumahTangga: { include: { periode: true } } },
@@ -84,6 +99,20 @@ export class SanggahanService {
       throw new HttpException(
         { error: { code: 'SUDAH_DITINJAU', message: `Sanggahan ini sudah ${request.status}` } },
         HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    // Membatasi daftar saja tidak cukup: id sanggahan bisa diketahui dari tempat
+    // lain, dan endpoint ini yang benar-benar mengubah data rumah tangga.
+    if (user && user.role !== 'admin' && request.rumahTangga.wilayahId !== user.wilayahId) {
+      throw new HttpException(
+        {
+          error: {
+            code: 'AKSES_DITOLAK',
+            message: 'Sanggahan ini berasal dari luar wilayah kerja Anda',
+          },
+        },
+        HttpStatus.FORBIDDEN,
       );
     }
 

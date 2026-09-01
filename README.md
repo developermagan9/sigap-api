@@ -59,9 +59,12 @@ Variabel yang dipakai:
 Proyek ini belum punya riwayat migrasi Prisma (`prisma/migrations` kosong), jadi skema disinkronkan langsung dengan `db push`:
 ```bash
 npx prisma db push
+npm run wilayah:seed    # referensi wilayah nasional — HARUS sebelum prisma:seed
 npm run prisma:seed
 ```
 Jika sebelumnya sempat memakai `prisma migrate`, gunakan `npx prisma migrate deploy` sebagai gantinya.
+
+`wilayah:seed` memuat 91.599 wilayah administratif (38 provinsi, 514 kabupaten/kota, 7.285 kecamatan, 83.762 desa/kelurahan) sesuai Kepmendagri No. 300.2.2-2138 Tahun 2025 dari `prisma/data/wilayah-indonesia.csv`. Idempoten dan wajib di lingkungan mana pun — termasuk produksi, di mana `prisma:seed` (data demo) justru tidak boleh dijalankan. `npm run wilayah:refresh` menarik versi terbaru dari sumber hulu; lihat `prisma/data/README.md`.
 
 ### 5. Menjalankan Server
 ```bash

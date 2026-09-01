@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Compose khusus DEPLOY dari Jenkins  —  bukan untuk dev lokal.
+#  Untuk dev lokal (API + UI + Postgres sekaligus) pakai ../docker-compose.yml
+#  di root monorepo.
+#
+#  Image `sigap-api` sudah dibangun lebih dulu oleh stage "Docker image" di
+#  Jenkinsfile, jadi di sini TIDAK ada `build:` — cukup referensi tag lewat
+#  variabel $IMAGE_TAG (di-export oleh pipeline; fallback ke `latest`).
+#
+#  Variabel yang diinjeksi Jenkins lewat `withCredentials`:
+#    IMAGE_TAG, JWT_SECRET, SYSTEM_PEPPER, DB_ENCRYPTION_KEY, POSTGRES_PASSWORD
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sigap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sigap_secret}
+      POSTGRES_DB: sigap_bansos
+    volumes:
+      - sigap-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sigap -d sigap_bansos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sigap-api:
+    image: sigap-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://sigap:${POSTGRES_PASSWORD:-sigap_secret}@postgres:5432/sigap_bansos?schema=public"
+      # `:?...` = compose berhenti dengan pesan ini kalau variabelnya kosong.
+      # Sengaja galak: NODE_ENV=production membuat aplikasi menolak start tanpa
+      # nilai-nilai ini (src/common/env.validation.ts).
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET wajib — set kredensial sigap-jwt-secret di Jenkins}"
+      SYSTEM_PEPPER: "${SYSTEM_PEPPER:?SYSTEM_PEPPER wajib — set kredensial sigap-system-pepper di Jenkins}"
+      DB_ENCRYPTION_KEY: "${DB_ENCRYPTION_KEY:?DB_ENCRYPTION_KEY wajib — set kredensial sigap-db-encryption-key di Jenkins}"
+      NODE_ENV: "production"
+      PORT: "3001"
+      CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:3000}"
+    ports:
+      - "3001:3001"
+    healthcheck:
+      # busybox wget ikut di image node:20-alpine.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+
+volumes:
+  sigap-pgdata:

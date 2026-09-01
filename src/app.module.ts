@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
@@ -15,6 +16,10 @@ import { SanggahanModule } from './sanggahan/sanggahan.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    // Rate limiting untuk API publik (07-Security-Privacy-Ethics.md §3) — mencegah
+    // scraping data agregat / DDoS. Diterapkan lewat ThrottlerGuard di
+    // PublicController (endpoint tanpa auth). Endpoint ber-JWT tidak dibatasi.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     PrismaModule,
     AuthModule,
     WilayahModule,

@@ -20,6 +20,38 @@ const FEATURE_KEYS = [
   'skorKondisiRumah',
 ] as const;
 
+// Status di mana daftar penerima sudah disahkan / dikunci — menjalankan ulang
+// clustering / TOPSIS / alokasi pada status ini akan menghapus (deleteMany)
+// ranking final yang sudah ditandatangani, jadi ditolak keras. Iterasi normal
+// (draft/clustering/ranking/alokasi) tetap boleh diulang.
+const STATUS_TERKUNCI = ['reviewed', 'approved', 'disbursed'];
+
+function assertPeriodeTidakTerkunci(status: string) {
+  if (STATUS_TERKUNCI.includes(status)) {
+    throw new HttpException(
+      {
+        code: 'PERIODE_TERKUNCI',
+        message: `Periode berstatus '${status}' — daftar penerima sudah dikunci. Batalkan approval sebelum menjalankan ulang tahap data mining.`,
+      },
+      HttpStatus.UNPROCESSABLE_ENTITY,
+    );
+  }
+}
+
+// Ketiga skema di 05-Algorithm-Design.md §5.2 sudah diimplementasikan di
+// alokasi.service.ts. Nama di luar daftar ini tetap ditolak eksplisit alih-alih
+// diam-diam dihitung sebagai flat.
+const SKEMA_ALOKASI_DIDUKUNG = ['flat', 'berjenjang', 'proporsional'];
+
+// Faktor pengali nominal per label cluster untuk skema `berjenjang`, dipakai bila
+// periode belum menyimpan `faktor_cluster` sendiri. Angkanya contoh di §5.2-B.
+const FAKTOR_CLUSTER_DEFAULT: Record<string, number> = {
+  'Sangat Rentan': 1.25,
+  Rentan: 1.0,
+  'Cukup Mampu': 0.75,
+  Mampu: 0.5,
+};
+
 @Injectable()
 export class MiningService {
   private readonly logger = new Logger(MiningService.name);
@@ -41,15 +73,21 @@ export class MiningService {
     if (!periode) {
       throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
     }
+    assertPeriodeTidakTerkunci(periode.status);
 
     const kTarget = k || periode.kCluster || 4;
 
-    // Fetch all verified households for this period
+    // Fetch all verified households for this period.
+    // `orderBy` WAJIB: tanpa ini Postgres tidak menjamin urutan baris, sedangkan
+    // inisialisasi K-Means++ memilih centroid awal berdasarkan indeks baris —
+    // urutan yang berbeda menghasilkan assignment yang berbeda untuk data yang
+    // sama persis (lihat 15-Checklist-Belum-Terimplementasi.md item C).
     const households = await this.prisma.rumahTangga.findMany({
       where: {
         periodeId,
         statusVerifikasi: 'verified',
       },
+      orderBy: { id: 'asc' },
     });
 
     if (households.length < kTarget) {
@@ -101,14 +139,29 @@ export class MiningService {
       });
     }
 
+    // Silhouette score dihitung di ruang terstandardisasi memakai label
+    // peringkat (bukan index mentah K-Means) — nilainya sama, tapi konsisten
+    // dengan apa yang disimpan per rumah tangga di bawah.
+    const labelPeringkat = result.assignments.map((a) => labelMapping.indexOf(a));
+    const silhouetteScore = this.kmeans.silhouette(Xstd, labelPeringkat);
+
     // Delete old cluster results
     await this.prisma.clusterResult.deleteMany({ where: { periodeId } });
     // Also delete old ranking results
     await this.prisma.rankingResult.deleteMany({ where: { periodeId } });
 
-    // Save new cluster results
+    // Kosongkan assignment lama (baris yang tadinya verified lalu ditolak, atau
+    // sisa run sebelumnya) supaya tidak ada cluster "hantu" yang ikut terbaca
+    // run-topsis. `clusterResultId` sendiri sudah jadi NULL karena onDelete:
+    // SetNull di atas — `clusterIndex` yang perlu dibersihkan manual.
+    await this.prisma.rumahTangga.updateMany({
+      where: { periodeId },
+      data: { clusterIndex: null, clusterResultId: null },
+    });
+
+    // Save new cluster results + assignment per rumah tangga
     for (const cd of clusterData) {
-      await this.prisma.clusterResult.create({
+      const created = await this.prisma.clusterResult.create({
         data: {
           periodeId,
           clusterIndex: cd.clusterIndex,
@@ -117,12 +170,19 @@ export class MiningService {
           jumlahAnggota: cd.householdIds.length,
         },
       });
+
+      if (cd.householdIds.length > 0) {
+        await this.prisma.rumahTangga.updateMany({
+          where: { id: { in: cd.householdIds } },
+          data: { clusterIndex: cd.clusterIndex, clusterResultId: created.id },
+        });
+      }
     }
 
     // Update period status
     await this.prisma.periodeProgram.update({
       where: { id: periodeId },
-      data: { status: 'clustering', kCluster: kTarget },
+      data: { status: 'clustering', kCluster: kTarget, silhouetteScore },
     });
 
     // Audit
@@ -130,7 +190,7 @@ export class MiningService {
       action: 'run_clustering',
       entityType: 'periode_program',
       entityId: periodeId,
-      afterState: { k: kTarget, sse: result.sse, iterations: result.iterations },
+      afterState: { k: kTarget, sse: result.sse, iterations: result.iterations, silhouette: silhouetteScore },
     });
 
     // Compute elbow data
@@ -143,6 +203,7 @@ export class MiningService {
       k: kTarget,
       sse: result.sse,
       iterations: result.iterations,
+      silhouette_score: silhouetteScore,
       clusters: clusterData.map((cd) => ({
         cluster_index: cd.clusterIndex,
         label: cd.label,
@@ -157,11 +218,20 @@ export class MiningService {
    * Get clustering result for a period.
    */
   async getClusteringResult(periodeId: string) {
-    const clusters = await this.prisma.clusterResult.findMany({
-      where: { periodeId },
-      orderBy: { clusterIndex: 'asc' },
-    });
-    return { clusters };
+    const [clusters, periode] = await Promise.all([
+      this.prisma.clusterResult.findMany({
+        where: { periodeId },
+        orderBy: { clusterIndex: 'asc' },
+      }),
+      this.prisma.periodeProgram.findUnique({
+        where: { id: periodeId },
+        select: { silhouetteScore: true },
+      }),
+    ]);
+    return {
+      clusters,
+      silhouette_score: periode?.silhouetteScore == null ? null : Number(periode.silhouetteScore),
+    };
   }
 
   /**
@@ -185,6 +255,7 @@ export class MiningService {
     if (!periode) {
       throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
     }
+    assertPeriodeTidakTerkunci(periode.status);
 
     // Get clusters in target indices. Prisma/Postgres does not guarantee row
     // order for `in` filters without an explicit orderBy, so we re-sort to
@@ -212,32 +283,29 @@ export class MiningService {
     let globalRank = 0;
     const allResults: any[] = [];
 
+    // Assignment cluster per rumah tangga sudah disimpan `run-clustering`
+    // (kolom cluster_result_id). Kalau kosong berarti data ini berasal dari run
+    // sebelum kolom itu ada — minta clustering dijalankan ulang alih-alih
+    // menghitung ulang K-Means di sini, karena hasil perhitungan ulang belum
+    // tentu identik dengan agregat ClusterResult yang sudah tersimpan.
+    const jumlahAssigned = await this.prisma.rumahTangga.count({
+      where: { periodeId, statusVerifikasi: 'verified', clusterResultId: { not: null } },
+    });
+    if (jumlahAssigned === 0) {
+      throw new HttpException(
+        {
+          code: 'CLUSTER_ASSIGNMENT_TIDAK_ADA',
+          message:
+            'Assignment cluster per rumah tangga belum tersimpan untuk periode ini. Jalankan ulang run-clustering terlebih dahulu.',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
     for (const cluster of clusters) {
-      // Get all households in this cluster period
-      // We need to find which households belong to this cluster
-      // This is determined during clustering; we'll re-fetch verified households and re-assign
-      const households = await this.prisma.rumahTangga.findMany({
-        where: { periodeId, statusVerifikasi: 'verified' },
-      });
-
-      // Re-run clustering assignment to determine which households are in this cluster
-      // For efficiency in production, store cluster assignments. For now, re-compute.
-      const X = households.map((h) => [
-        Number(h.pendapatanPerKapita),
-        h.jumlahTanggungan,
-        h.jumlahDisabilitasLansia,
-        h.skorKondisiRumah,
-      ]);
-
-      const { Xstd } = this.kmeans.standardize(X);
-      const kmeansResult = this.kmeans.run(Xstd, periode.kCluster);
-      const labelMapping = this.kmeans.labelByIncome(kmeansResult.centroids, 0);
-
-      // Find households that belong to this cluster
-      const clusterHouseholds = households.filter((_, i) => {
-        const assignedCluster = kmeansResult.assignments[i];
-        const sortedIdx = labelMapping.indexOf(assignedCluster);
-        return sortedIdx === cluster.clusterIndex;
+      const clusterHouseholds = await this.prisma.rumahTangga.findMany({
+        where: { periodeId, statusVerifikasi: 'verified', clusterResultId: cluster.id },
+        orderBy: { id: 'asc' },
       });
 
       if (clusterHouseholds.length === 0) continue;
@@ -351,10 +419,22 @@ export class MiningService {
     skemaAlokasi: string,
     nominalDasar: number,
     biayaOperasional: number,
+    opsi?: { faktorCluster?: Record<string, number>; nominalMin?: number; nominalMax?: number },
   ) {
     const periode = await this.prisma.periodeProgram.findUnique({ where: { id: periodeId } });
     if (!periode) {
       throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
+    }
+    assertPeriodeTidakTerkunci(periode.status);
+
+    if (!SKEMA_ALOKASI_DIDUKUNG.includes(skemaAlokasi)) {
+      throw new HttpException(
+        {
+          code: 'SKEMA_ALOKASI_BELUM_DIDUKUNG',
+          message: `Skema alokasi '${skemaAlokasi}' belum diimplementasikan. Skema yang tersedia: ${SKEMA_ALOKASI_DIDUKUNG.join(', ')}.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
 
     // Get draft ranking results
@@ -386,12 +466,58 @@ export class MiningService {
     }));
 
     const anggaranTotal = Number(periode.anggaranTotal);
-    const alokasiResult = this.alokasi.alokasiFlat(kandidat, anggaranTotal, nominalDasar, biayaOperasional);
 
-    // Update ranking results with terpilih and amount
+    // Faktor cluster hanya relevan untuk `berjenjang`; disimpan ke periode supaya
+    // angka yang dipakai bisa diaudit ulang persis seperti bobot kriteria TOPSIS.
+    const faktorCluster: Record<string, number> =
+      opsi?.faktorCluster ??
+      ((periode.faktorCluster as Record<string, number> | null) ?? FAKTOR_CLUSTER_DEFAULT);
+
+    let alokasiResult;
+    if (skemaAlokasi === 'berjenjang') {
+      alokasiResult = this.alokasi.alokasiBerjenjang(
+        kandidat,
+        anggaranTotal,
+        nominalDasar,
+        biayaOperasional,
+        faktorCluster,
+      );
+    } else if (skemaAlokasi === 'proporsional') {
+      alokasiResult = this.alokasi.alokasiProporsional(
+        kandidat,
+        anggaranTotal,
+        nominalDasar,
+        biayaOperasional,
+        opsi?.nominalMin,
+        opsi?.nominalMax,
+      );
+    } else {
+      alokasiResult = this.alokasi.alokasiFlat(kandidat, anggaranTotal, nominalDasar, biayaOperasional);
+    }
+
+    // Bersihkan hasil alokasi sebelumnya SEBELUM menandai yang baru. Tanpa ini,
+    // menjalankan ulang alokasi (ganti skema / nominal / anggaran) menyisakan
+    // baris yang tetap `terpilih = true` dengan amount lama — build-merkle lalu
+    // gagal di invarian §5.4 karena Σ amount tidak sama dengan total_alokasi dan
+    // jumlah leaf melebihi kuota.
+    await this.prisma.rankingResult.updateMany({
+      where: { periodeId },
+      data: { terpilih: false, amount: null },
+    });
+
+    // Update ranking results with terpilih and amount. Dikelompokkan per nominal
+    // supaya skema flat (semua nominal sama) cukup satu query alih-alih satu per
+    // penerima; skema berjenjang/proporsional tetap hemat karena nominalnya
+    // berulang di banyak baris.
+    const perNominal = new Map<number, string[]>();
     for (const [id, amount] of alokasiResult.amount) {
+      const daftar = perNominal.get(amount) ?? [];
+      daftar.push(id);
+      perNominal.set(amount, daftar);
+    }
+    for (const [amount, ids] of perNominal) {
       await this.prisma.rankingResult.updateMany({
-        where: { periodeId, rumahTanggaId: id },
+        where: { periodeId, rumahTanggaId: { in: ids } },
         data: { terpilih: true, amount },
       });
     }
@@ -407,6 +533,7 @@ export class MiningService {
         kuotaPenerima: alokasiResult.kuotaPenerima,
         totalAlokasi: alokasiResult.totalAlokasi,
         sisaAnggaran: alokasiResult.sisaAnggaran,
+        faktorCluster: skemaAlokasi === 'berjenjang' ? faktorCluster : undefined,
       },
     });
 
@@ -422,10 +549,19 @@ export class MiningService {
       },
     });
 
+    // Nominal tidak lagi selalu seragam di skema selain `flat` — kirim sebarannya
+    // supaya UI bisa menampilkan "berapa KK dapat berapa" tanpa menebak.
+    const sebaranNominal = new Map<number, number>();
+    alokasiResult.amount.forEach((v) => sebaranNominal.set(v, (sebaranNominal.get(v) ?? 0) + 1));
+
     return {
       skema_alokasi: skemaAlokasi,
       anggaran_efektif: alokasiResult.anggaranEfektif,
       nominal_dasar: nominalDasar,
+      faktor_cluster: skemaAlokasi === 'berjenjang' ? faktorCluster : null,
+      sebaran_nominal: Array.from(sebaranNominal.entries())
+        .sort((a, b) => b[0] - a[0])
+        .map(([nominal, jumlah]) => ({ nominal, jumlah_penerima: jumlah })),
       kuota_penerima: alokasiResult.kuotaPenerima,
       total_alokasi: alokasiResult.totalAlokasi,
       sisa_anggaran: alokasiResult.sisaAnggaran,

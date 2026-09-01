@@ -1,40 +1,19 @@
-import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsString, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateWilayahDto {
   @ApiProperty({
-    example: 'Jawa Barat',
-    description: 'Nama provinsi',
+    example: '34.04.01.2001',
+    description:
+      'Kode desa/kelurahan Kepmendagri (PP.KK.CC.DDDD) dari GET /wilayah/referensi. ' +
+      'Nama provinsi/kabupaten/kecamatan/desa diambil server dari tabel referensi — ' +
+      'tidak dikirim klien, supaya kombinasi yang mustahil (mis. kecamatan Sleman ' +
+      'di provinsi Bali) tidak bisa tersimpan.',
   })
   @IsString()
   @IsNotEmpty()
-  @MaxLength(100)
-  provinsi: string;
-
-  @ApiProperty({
-    example: 'Bandung',
-    description: 'Nama kabupaten atau kota',
+  @Matches(/^\d{2}\.\d{2}\.\d{2}\.\d{4}$/, {
+    message: 'kode harus berbentuk PP.KK.CC.DDDD, mis. 34.04.01.2001',
   })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(100)
-  kabupaten: string;
-
-  @ApiProperty({
-    example: 'Coblong',
-    description: 'Nama kecamatan',
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(100)
-  kecamatan: string;
-
-  @ApiProperty({
-    example: 'Dago',
-    description: 'Nama kelurahan atau desa',
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(100)
-  desa: string;
+  kode: string;
 }
