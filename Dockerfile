@@ -1,6 +1,12 @@
 FROM node:20-alpine AS base
 WORKDIR /app
 
+# Prisma butuh OpenSSL terpasang untuk memilih engine yang benar. Tanpa ini,
+# di Alpine terbaru (OpenSSL 3.x) Prisma gagal deteksi, jatuh ke engine
+# "openssl-1.1.x" yang libssl.so.1.1-nya tidak ada, lalu schema-engine mati
+# dengan "Could not parse schema engine response ... Error loading shared library".
+RUN apk add --no-cache openssl
+
 # Install dependencies
 FROM base AS deps
 COPY package.json package-lock.json* ./
