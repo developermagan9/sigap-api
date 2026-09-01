@@ -89,9 +89,14 @@ pipeline {
       }
     }
 
-    stage('Deploy') {
+    stage('Deploy & Smoke test') {
       when { expression { return shouldDeploy() } }
       steps {
+        // Deploy DAN smoke test harus satu blok `withCredentials`: tiap perintah
+        // `docker compose` (termasuk `logs`) meng-interpolasi ulang seluruh
+        // compose file, dan `${JWT_SECRET:?...}` dkk bikin compose mati kalau
+        // variabelnya tidak ada di environment. Smoke test yang terpisah dari
+        // blok ini pasti gagal di situ, bukan di API-nya.
         withCredentials([
           string(credentialsId: 'sigap-jwt-secret',        variable: 'JWT_SECRET'),
           string(credentialsId: 'sigap-system-pepper',      variable: 'SYSTEM_PEPPER'),
@@ -101,29 +106,37 @@ pipeline {
           // Container `sigap-api` menjalankan `prisma db push` + seed wilayah lalu
           // start (lihat CMD di Dockerfile) — idempoten, aman diulang tiap deploy.
           sh '''
+            set -e
             export IMAGE_TAG
             docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+
+            # Cek status healthcheck CONTAINER, bukan `curl localhost:3001` dari
+            # agent: kalau Jenkins ini jalan di dalam container, port publish
+            # compose ada di host — bukan di `localhost` agent — jadi curl-nya
+            # selalu gagal walau API sehat. Healthcheck di-eval di dalam
+            # container `sigap-api` sendiri (lihat docker-compose.deploy.yml).
+            cid="$(docker compose -f "$COMPOSE_FILE" ps -q sigap-api)"
+            echo "Menunggu container sigap-api sehat ..."
+            for i in $(seq 1 40); do
+              running="$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null || echo false)"
+              status="$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo none)"
+              echo "  [$((i*3))s] running=$running health=$status"
+              if [ "$status" = "healthy" ]; then
+                echo "OK - API sehat."
+                exit 0
+              fi
+              if [ "$running" != "true" ]; then
+                echo "GAGAL - container sigap-api berhenti. Log:"
+                docker compose -f "$COMPOSE_FILE" logs --tail=200 sigap-api
+                exit 1
+              fi
+              sleep 3
+            done
+            echo "GAGAL - API tidak sehat setelah 120 detik. Log:"
+            docker compose -f "$COMPOSE_FILE" logs --tail=200 sigap-api
+            exit 1
           '''
         }
-      }
-    }
-
-    stage('Smoke test') {
-      when { expression { return shouldDeploy() } }
-      steps {
-        sh '''
-          echo "Menunggu API sehat di http://localhost:3001/health ..."
-          for i in $(seq 1 40); do
-            if curl -fsS http://localhost:3001/health >/dev/null 2>&1; then
-              echo "OK - API merespons setelah $((i*3)) detik."
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "GAGAL - API tidak sehat setelah 120 detik. Log terakhir:"
-          docker compose -f "$COMPOSE_FILE" logs --tail=120 sigap-api
-          exit 1
-        '''
       }
     }
   }
