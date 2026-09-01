@@ -15,9 +15,14 @@ async function bootstrap() {
   // Global prefix
   app.setGlobalPrefix('v1', { exclude: ['health'] });
 
-  // CORS
+  // CORS. `CORS_ORIGIN` boleh berisi beberapa origin dipisah koma, mis.
+  // "http://localhost:3000,http://43.133.144.108:3000" — supaya FE lokal dan FE
+  // yang di-deploy di VPS sama-sama diizinkan tanpa ganti konfigurasi.
   app.enableCors({
-    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    origin: (process.env.CORS_ORIGIN || 'http://localhost:3000')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean),
     credentials: true,
   });
 

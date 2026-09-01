@@ -44,6 +44,11 @@ pipeline {
     IMAGE_NAME   = 'sigap-api'
     COMPOSE_FILE = 'docker-compose.deploy.yml'
     NODE_IMAGE   = 'node:20-alpine'
+
+    // Origin frontend yang diizinkan CORS (boleh banyak, dipisah koma —
+    // main.ts sudah mem-parse-nya). FE VPS di port 3000, plus localhost untuk
+    // dev lokal yang menembak API ini.
+    CORS_ORIGIN  = 'http://43.133.144.108:3000,http://localhost:3000'
   }
 
   stages {
@@ -107,7 +112,7 @@ pipeline {
           // start (lihat CMD di Dockerfile) — idempoten, aman diulang tiap deploy.
           sh '''
             set -e
-            export IMAGE_TAG
+            export IMAGE_TAG CORS_ORIGIN
             docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
             # Cek status healthcheck CONTAINER, bukan `curl localhost:3001` dari
