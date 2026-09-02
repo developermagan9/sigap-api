@@ -45,6 +45,17 @@ pipeline {
     COMPOSE_FILE = 'docker-compose.deploy.yml'
     NODE_IMAGE   = 'node:20-alpine'
 
+    // Kunci nama project compose. Tanpa ini compose memakai nama DIREKTORI
+    // workspace, yang berubah begitu Jenkins memakai path lain (mis. `@2`
+    // saat build paralel, atau nama job/branch yang berbeda pada Multibranch).
+    // Akibatnya tiap perubahan path membuat stack BARU, sementara stack lama
+    // tetap hidup dan masih memegang port 3001 — persis kegagalan
+    // "Bind for 0.0.0.0:3001 failed: port is already allocated".
+    // `--remove-orphans` tidak menolong: ia hanya menyapu container di dalam
+    // project yang sama, tidak bisa menyentuh project lain.
+    // Dengan nama tetap, `up -d` mengganti container yang sama di tempatnya.
+    COMPOSE_PROJECT_NAME = 'sigap-api'
+
     // Origin frontend yang diizinkan CORS (boleh banyak, dipisah koma —
     // main.ts sudah mem-parse-nya). FE VPS di port 3000, plus localhost untuk
     // dev lokal yang menembak API ini.
@@ -112,7 +123,30 @@ pipeline {
           // start (lihat CMD di Dockerfile) — idempoten, aman diulang tiap deploy.
           sh '''
             set -e
-            export IMAGE_TAG CORS_ORIGIN
+            export IMAGE_TAG CORS_ORIGIN COMPOSE_PROJECT_NAME
+
+            # Preflight port: kalau 3001 dipegang container DI LUAR project ini,
+            # `up` gagal dengan pesan daemon ("Bind for 0.0.0.0:3001 failed:
+            # port is already allocated") yang tidak menyebut siapa pelakunya —
+            # dan orang berikutnya harus menebak. Sebutkan namanya di sini.
+            # Dibandingkan lewat LABEL project, bukan prefix nama container:
+            # project `sigap-api-main` melahirkan container
+            # `sigap-api-main-sigap-api-1` yang juga diawali "sigap-api-", jadi
+            # penyaringan berbasis nama akan meloloskan justru stack asing yang
+            # sedang kita cari. Label kosong (container non-compose) juga kena.
+            bentrok="$(docker ps --filter publish=3001 \
+              --format '{{.Names}}|{{.Label "com.docker.compose.project"}}' \
+              | awk -F'|' -v p="$COMPOSE_PROJECT_NAME" \
+                  '$2 != p { print $1 " [project=" ($2 == "" ? "<non-compose>" : $2) "]" }')"
+            if [ -n "$bentrok" ]; then
+              echo "GAGAL - port 3001 sudah dipegang container lain:"
+              echo "  $bentrok"
+              echo "Hentikan dulu di server, mis:  docker rm -f <nama-container>"
+              echo "(kalau itu stack deploy lama dgn nama project berbeda:"
+              echo "   docker compose -p <project-lama> -f $COMPOSE_FILE down)"
+              exit 1
+            fi
+
             docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
             # Cek status healthcheck CONTAINER, bukan `curl localhost:3001` dari
