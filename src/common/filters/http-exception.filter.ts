@@ -46,7 +46,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
       }
     } else if (exception instanceof Error) {
       this.logger.error(exception.message, exception.stack);
-      errorResponse.message = exception.message;
+      // Error yang tidak kita lempar sendiri (mis. Prisma) membawa nama kolom,
+      // potongan query, dan struktur tabel di `message`-nya. Itu berguna di log
+      // server, tapi tidak boleh ikut ke response: di produksi klien cukup tahu
+      // ada kesalahan internal. Di development pesannya tetap diteruskan supaya
+      // debugging tidak jadi menebak-nebak.
+      if (process.env.NODE_ENV !== 'production') {
+        errorResponse.message = exception.message;
+      }
     }
 
     response.status(status).json({ error: errorResponse });

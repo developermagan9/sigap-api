@@ -1,0 +1,48 @@
+# CI sigap-api — 15-Checklist-Belum-Terimplementasi.md item K + temuan #7.
+#
+# Dipecah dari `.github/workflows/ci.yml` monorepo (2026-09-02). Versi lama itu
+# tidak pernah ter-trigger: file-nya duduk di root monorepo yang bukan git repo,
+# sementara tiap service adalah repo GitHub terpisah. Di sini path-nya relatif ke
+# root repo `sigap-api`, jadi `working-directory: sigap-api` yang lama dibuang.
+#
+# Job e2e (API + UI + Postgres) tidak ikut ke sini — dia butuh kedua repo, jadi
+# tinggal di repo `sigap-ui` yang mengambil repo ini lewat checkout kedua.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+# PR yang di-push berkali-kali membatalkan run sebelumnya — hemat runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  api:
+    name: typecheck, unit test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      # Prisma Client digenerate dari skema — tipe hasil generate dipakai
+      # typecheck, jadi harus jalan lebih dulu. Tidak butuh database.
+      - run: npx prisma generate
+
+      - run: npm run typecheck
+
+      # Unit test algoritma, Merkle, validasi env & DTO — murni in-memory,
+      # tanpa database.
+      - run: npm test
+
+      - run: npm run build

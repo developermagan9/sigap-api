@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsArray, IsObject, IsString, IsEnum, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsArray, IsObject, IsString, IsEnum, IsUUID, Min } from 'class-validator';
 
 export class RunClusteringDto {
   @IsNumber()
@@ -51,7 +51,15 @@ export class RunAlokasiDto {
 }
 
 export class FinalizeRankingDto {
-  @IsString()
+  /**
+   * ID user (UUID) yang menyetujui — bukan username. Divalidasi `@IsUUID()`
+   * supaya nilai salah ditolak `400` sebelum menyentuh DB sama sekali: tanpa
+   * ini, `finalizeRanking()` sempat meng-commit transisi status
+   * `alokasi -> reviewed` lebih dulu, lalu baru gagal saat `audit.log()`
+   * menulis `actorId` ke kolom UUID — API melaporkan 500 (dengan detail Prisma
+   * ikut bocor ke response) padahal status periode sudah terlanjur berubah.
+   */
+  @IsUUID()
   approvedBy: string;
 
   @IsString()
