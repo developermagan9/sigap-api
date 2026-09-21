@@ -32,6 +32,15 @@ export class BlockchainController {
     return this.blockchainService.submitOnchain(id, req.user?.id);
   }
 
+  /** Tarik event `FundDisbursed` sekarang juga, tanpa menunggu poller berikutnya. */
+  @Post(':id/sync-klaim')
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('admin' as any)
+  syncKlaim(@Param('id') id: string) {
+    return this.blockchainService.syncKlaim(id);
+  }
+
   @Get(':id/disbursement-status')
   @ApiBearerAuth()
   @UseGuards(AuthGuard('jwt'), RolesGuard)
