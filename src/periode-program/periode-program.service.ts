@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreatePeriodeDto } from './dto/create-periode.dto';
 import { UpdatePeriodeDto } from './dto/update-periode.dto';
-import { ProgramStatus, SkemaAlokasi } from '@prisma/client';
+import { Prisma, ProgramStatus, SkemaAlokasi } from '@prisma/client';
 
 @Injectable()
 export class PeriodeProgramService {
@@ -211,12 +211,18 @@ export class PeriodeProgramService {
    * draft -> clustering -> ranking -> alokasi -> reviewed -> approved -> disbursed
    * Throws 422 if invalid transition.
    */
+  /**
+   * `db` opsional: pemanggil yang perlu beberapa transisi + perubahan lain terjadi
+   * atomik (mis. finalizeRanking) meneruskan client `$transaction`-nya; pemanggil
+   * lain tetap memakai `this.prisma` seperti sebelumnya.
+   */
   async updateStatus(
     id: string,
     newStatus: ProgramStatus | string,
     actorId?: string,
+    db: Prisma.TransactionClient = this.prisma,
   ) {
-    const existing = await (this.prisma as any).periodeProgram.findUnique({
+    const existing = await (db as any).periodeProgram.findUnique({
       where: { id },
     });
 
@@ -260,7 +266,7 @@ export class PeriodeProgramService {
       );
     }
 
-    const updated = await (this.prisma as any).periodeProgram.update({
+    const updated = await (db as any).periodeProgram.update({
       where: { id },
       data: { status: newStatus as ProgramStatus },
     });
@@ -273,7 +279,7 @@ export class PeriodeProgramService {
         entityType: 'periode_program',
         beforeState: { status: existing.status },
         afterState: { status: updated.status },
-      });
+      }, db);
     }
 
     return updated;

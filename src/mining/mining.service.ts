@@ -598,26 +598,33 @@ export class MiningService {
       );
     }
 
-    // Update all draft rankings to final
-    await this.prisma.rankingResult.updateMany({
-      where: { periodeId, status: 'draft' },
-      data: { status: 'final' },
-    });
+    // Satu transaksi: ranking draft -> final, alokasi -> reviewed -> approved, dan
+    // jejak auditnya. Sebelumnya ketiganya query terpisah — kegagalan di antara dua
+    // updateStatus() meninggalkan ranking `final` pada periode yang masih `reviewed`,
+    // dan percobaan ulang tidak bisa membedakannya dari finalisasi yang sah.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.rankingResult.updateMany({
+        where: { periodeId, status: 'draft' },
+        data: { status: 'final' },
+      });
 
-    // Route the status change through the single source of truth for the FSM
-    // (PeriodeProgramService.updateStatus), which only allows one step at a
-    // time (alokasi -> reviewed -> approved).
-    if (periode.status === 'alokasi') {
-      await this.periodeProgramService.updateStatus(periodeId, 'reviewed', approvedBy);
-    }
-    await this.periodeProgramService.updateStatus(periodeId, 'approved', approvedBy);
+      // Status tetap lewat satu-satunya sumber FSM (PeriodeProgramService.updateStatus),
+      // yang hanya mengizinkan satu langkah per panggilan.
+      if (periode.status === 'alokasi') {
+        await this.periodeProgramService.updateStatus(periodeId, 'reviewed', approvedBy, tx);
+      }
+      await this.periodeProgramService.updateStatus(periodeId, 'approved', approvedBy, tx);
 
-    await this.audit.log({
-      actorId: approvedBy,
-      action: 'finalize_ranking',
-      entityType: 'periode_program',
-      entityId: periodeId,
-      afterState: { catatan, status: 'approved' },
+      await this.audit.log(
+        {
+          actorId: approvedBy,
+          action: 'finalize_ranking',
+          entityType: 'periode_program',
+          entityId: periodeId,
+          afterState: { catatan, status: 'approved' },
+        },
+        tx,
+      );
     });
 
     return {

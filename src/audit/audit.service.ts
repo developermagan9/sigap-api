@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface LogAuditDto {
@@ -14,8 +15,9 @@ export interface LogAuditDto {
 export class AuditService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async log(data: LogAuditDto) {
-    return this.prisma.auditLog.create({
+  /** `db` = client transaksi pemanggil, supaya jejak audit ikut batal bila transaksinya batal. */
+  async log(data: LogAuditDto, db: Prisma.TransactionClient = this.prisma) {
+    return db.auditLog.create({
       data: {
         actorId: data.actorId || null,
         action: data.action,
