@@ -28,6 +28,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   async validate(payload: JwtPayload) {
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
+      // Wilayah akses ikut ditarik di sini — sekali per request yang sudah
+      // melakukan findUnique ini — supaya tiap service tidak perlu query sendiri
+      // hanya untuk tahu batas kewenangan pemanggil.
+      include: { wilayahAkses: { select: { wilayahId: true } } },
     });
 
     if (!user || !user.isActive) {
@@ -39,6 +43,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       username: user.username,
       role: user.role,
       wilayahId: user.wilayahId,
+      // Kewenangan efektif = wilayah utama + seluruh wilayah tambahan.
+      wilayahIds: [
+        ...new Set([user.wilayahId, ...user.wilayahAkses.map((w) => w.wilayahId)].filter(Boolean)),
+      ] as string[],
       nama: user.nama,
     };
   }

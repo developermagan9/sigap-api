@@ -63,6 +63,19 @@ export class RumahTanggaController {
     return this.rumahTanggaService.verifikasi(id, dto, req.user?.id, req.user);
   }
 
+  @Get(':id')
+  @Roles('admin', 'verifikator', 'petugas')
+  @ApiOperation({
+    summary: 'Detail satu rumah tangga beserta PII yang didekripsi',
+    description:
+      'Satu-satunya jalur PII (nama, alamat, NIK, anggota keluarga) keluar dari sistem. ' +
+      'Di-scope wilayah seperti aksi tulis (403 di luar kewenangan) dan SETIAP pembacaan ' +
+      'dicatat audit log sebagai `LIHAT_PII`.',
+  })
+  findOne(@Param('id') id: string, @Request() req: any) {
+    return this.rumahTanggaService.findOne(id, req.user?.id, req.user);
+  }
+
   @Get()
   @Roles('admin', 'verifikator', 'petugas')
   findAll(

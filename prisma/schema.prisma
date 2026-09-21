@@ -96,6 +96,7 @@ model Wilayah {
 
   rumahTangga RumahTangga[]
   users       User[]
+  userAkses   UserWilayah[]
 
   @@map("wilayah")
 }
@@ -125,6 +126,9 @@ model User {
   passwordHash  String    @map("password_hash") @db.VarChar(255)
   nama          String    @db.VarChar(255)
   role          UserRole
+  /// Wilayah kerja UTAMA — dipertahankan sebagai default/tampilan dan supaya data
+  /// lama tetap sah. Kewenangan sebenarnya adalah gabungan kolom ini dengan
+  /// seluruh baris `UserWilayah` di bawah (lihat common/wilayah-scope.ts).
   wilayahId     String?   @map("wilayah_id") @db.Uuid
   walletAddress String?   @map("wallet_address") @db.VarChar(42)
   isActive      Boolean   @default(true) @map("is_active")
@@ -132,11 +136,32 @@ model User {
   lastLoginAt   DateTime? @map("last_login_at") @db.Timestamptz
 
   wilayah           Wilayah?           @relation(fields: [wilayahId], references: [id], onDelete: SetNull)
+  wilayahAkses      UserWilayah[]
   auditLogs         AuditLog[]
   sanggahanDiajukan SanggahanRequest[] @relation("SanggahanDiajukan")
   sanggahanDitinjau SanggahanRequest[] @relation("SanggahanDitinjau")
 
   @@map("users")
+}
+
+/// Wilayah kerja TAMBAHAN seorang user (relasi many-to-many user–wilayah).
+///
+/// `User.wilayahId` tunggal tidak bisa mewakili verifikator tingkat kecamatan
+/// atau dinas yang membawahi beberapa desa sekaligus — sebelum tabel ini ada,
+/// satu-satunya cara adalah membuat satu akun per desa. Kolom `wilayahId` lama
+/// TIDAK dihapus: ia tetap jadi wilayah utama (dipakai sebagai default form dan
+/// label di UI), dan kewenangan efektif = gabungan keduanya.
+model UserWilayah {
+  userId    String @map("user_id") @db.Uuid
+  wilayahId String @map("wilayah_id") @db.Uuid
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wilayah Wilayah @relation(fields: [wilayahId], references: [id], onDelete: Cascade)
+
+  @@id([userId, wilayahId])
+  /// Menopang "siapa saja yang berwenang atas wilayah ini".
+  @@index([wilayahId])
+  @@map("user_wilayah")
 }
 
 model RumahTangga {
