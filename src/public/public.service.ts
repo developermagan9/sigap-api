@@ -318,6 +318,9 @@ export class PublicService {
 
     const disbursement = await this.prisma.disbursementRecord.findFirst({
       where: { ...where, periode: { status: { in: [...STATUS_PUBLIK] } } },
+      // Satu wallet custodial bisa muncul di beberapa periode (diturunkan dari id
+      // rumah tangga) — tampilkan yang terbaru, bukan urutan acak dari Postgres.
+      orderBy: { createdAt: 'desc' },
       include: {
         periode: { select: { namaProgram: true, status: true } },
         rumahTangga: { select: { wilayah: { select: { desa: true, kecamatan: true } } } },
@@ -333,6 +336,8 @@ export class PublicService {
 
     return {
       reference: disbursement.reference,
+      // Dibutuhkan portal untuk meminta bukti Merkle (`GET /periode-program/:id/claim-proof`).
+      periode_id: disbursement.periodeId,
       status: disbursement.status,
       amount: Number(disbursement.amount),
       wallet: disbursement.walletAddress,

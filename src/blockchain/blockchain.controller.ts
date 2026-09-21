@@ -32,6 +32,15 @@ export class BlockchainController {
     return this.blockchainService.submitOnchain(id, req.user?.id);
   }
 
+  /** Deposit token dari wallet admin ke kontrak disbursement sebesar kekurangan periode ini. */
+  @Post(':id/danai-kontrak')
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('admin' as any)
+  danaiKontrak(@Param('id') id: string, @Request() req: any) {
+    return this.blockchainService.danaiKontrak(id, req.user?.id);
+  }
+
   /** Tarik event `FundDisbursed` sekarang juga, tanpa menunggu poller berikutnya. */
   @Post(':id/sync-klaim')
   @ApiBearerAuth()
