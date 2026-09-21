@@ -1,14 +1,50 @@
-import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MerkleService, MerkleLeaf } from './merkle.service';
 import { PeriodeProgramService } from '../periode-program/periode-program.service';
-import { keccak256, toUtf8Bytes, Contract, Wallet, JsonRpcProvider } from 'ethers';
+import { keccak256, toUtf8Bytes, Contract, EventLog, Wallet, JsonRpcProvider } from 'ethers';
 import { deriveCustodialWallet } from '../common/crypto.util';
 
-/** Basis URL block explorer; jaringan bisa berganti, jadi tidak di-hardcode. */
-function explorerBase(): string {
-  return process.env.EXPLORER_BASE_URL || 'https://amoy.polygonscan.com';
+const CHAIN_ID_HARDHAT = 31337;
+
+/** Chain id aktif; default Polygon Amoy sesuai 06-Smart-Contract-Design.md §2. */
+function chainIdAktif(): number {
+  const n = Number(process.env.CHAIN_ID);
+  return Number.isInteger(n) && n > 0 ? n : 80002;
+}
+
+/**
+ * Basis URL block explorer; jaringan bisa berganti, jadi tidak di-hardcode.
+ * Chain lokal Hardhat tidak punya explorer — `null` supaya tidak ada tautan
+ * Polygonscan ke alamat yang hanya ada di laptop developer.
+ */
+export function explorerBase(): string | null {
+  if (process.env.EXPLORER_BASE_URL) return process.env.EXPLORER_BASE_URL;
+  return chainIdAktif() === CHAIN_ID_HARDHAT ? null : 'https://amoy.polygonscan.com';
+}
+
+/** Nama jaringan untuk respons API & audit log, diturunkan dari CHAIN_ID. */
+export function namaJaringan(chainId: number = chainIdAktif()): string {
+  switch (chainId) {
+    case 80002:
+      return 'polygon-amoy';
+    case 137:
+      return 'polygon';
+    case CHAIN_ID_HARDHAT:
+      return 'hardhat-local';
+    default:
+      return `chain-${chainId}`;
+  }
+}
+
+/**
+ * periodeId (UUID) -> uint256 numerik yang dipakai kontrak. Leaf Merkle,
+ * `registerPeriode()`, dan event `FundDisbursed` semuanya memakai angka ini —
+ * ketiganya HARUS memakai derivasi yang sama persis.
+ */
+export function periodeIdNumerik(periodeId: string): number {
+  return parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
 }
 
 /**
@@ -29,10 +65,23 @@ export function alamatKontrakValid(alamat: string | null | undefined): string | 
 const REGISTRY_ABI = [
   'function registerPeriode(uint256 periodeId, bytes32 merkleRoot, uint256 totalAlokasi) external',
 ];
+const DISBURSEMENT_ABI = [
+  'event FundDisbursed(uint256 indexed periodeId, address indexed recipient, address indexed submitter, uint256 amount, bytes32 nikHash)',
+];
+
+/** Rentang blok per `eth_getLogs` — RPC publik Amoy menolak rentang yang terlalu lebar. */
+const RENTANG_BLOK_LOG = 5_000;
 
 @Injectable()
-export class BlockchainService {
+export class BlockchainService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BlockchainService.name);
+
+  /** periodeId -> blok pertama yang belum dipindai untuk event klaim. Hilang saat restart; dipindai ulang dari blok registrasi. */
+  private readonly kursorKlaim = new Map<string, number>();
+  private timerSinkron?: NodeJS.Timeout;
+  private sedangSinkron = false;
+  /** Pesan gagal terakhir per periode — supaya poller tidak mengulang peringatan yang sama tiap tick. */
+  private readonly galatSinkronTerakhir = new Map<string, string>();
 
   constructor(
     private prisma: PrismaService,
@@ -40,6 +89,154 @@ export class BlockchainService {
     private merkle: MerkleService,
     private periodeProgramService: PeriodeProgramService,
   ) {}
+
+  /**
+   * Poller sinkronisasi klaim. Klaim dikirim langsung ke kontrak oleh warga/relayer,
+   * bukan lewat API, jadi satu-satunya cara backend tahu ada klaim adalah membaca
+   * event `FundDisbursed`. `CLAIM_SYNC_INTERVAL_MS=0` mematikannya.
+   */
+  onModuleInit() {
+    const interval = Number(process.env.CLAIM_SYNC_INTERVAL_MS ?? 30_000);
+    if (!this.getClaimChainConfig() || !(interval > 0)) return;
+    this.timerSinkron = setInterval(() => void this.sinkronSemuaPeriode(), interval);
+    this.timerSinkron.unref();
+    this.logger.log(`Sinkronisasi klaim on-chain aktif, tiap ${interval} ms`);
+  }
+
+  onModuleDestroy() {
+    if (this.timerSinkron) clearInterval(this.timerSinkron);
+  }
+
+  private async sinkronSemuaPeriode() {
+    if (this.sedangSinkron) return;
+    this.sedangSinkron = true;
+    try {
+      const periodes = await this.prisma.periodeProgram.findMany({
+        where: { status: 'disbursed', txHash: { not: null }, contractAddress: { not: null } },
+        select: { id: true },
+      });
+      for (const { id } of periodes) {
+        try {
+          await this.syncKlaim(id);
+          this.galatSinkronTerakhir.delete(id);
+        } catch (err) {
+          const pesan = err instanceof HttpException ? JSON.stringify(err.getResponse()) : String(err);
+          if (this.galatSinkronTerakhir.get(id) !== pesan) {
+            this.logger.warn(`Sinkronisasi klaim periode ${id} gagal: ${pesan}`);
+            this.galatSinkronTerakhir.set(id, pesan);
+          }
+        }
+      }
+    } finally {
+      this.sedangSinkron = false;
+    }
+  }
+
+  /**
+   * Tarik event `FundDisbursed` periode ini dari kontrak disbursement dan tandai
+   * `disbursement_record` yang cocok sebagai `claimed`. Idempoten: record yang sudah
+   * `claimed` dilewati, jadi aman dipanggil berulang (poller + tombol manual).
+   */
+  async syncKlaim(periodeId: string) {
+    const chain = this.getClaimChainConfig();
+    if (!chain) {
+      throw new HttpException(
+        {
+          code: 'KONTRAK_BELUM_DIKONFIGURASI',
+          message: 'RPC_URL / DISBURSEMENT_CONTRACT_ADDRESS belum diisi — tidak ada kontrak untuk dibaca',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const periode = await this.prisma.periodeProgram.findUnique({ where: { id: periodeId } });
+    if (!periode) {
+      throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
+    }
+    if (!alamatKontrakValid(periode.contractAddress) || !periode.txHash) {
+      throw new HttpException(
+        { code: 'BELUM_ONCHAIN', message: 'Periode ini belum diregistrasi on-chain (masih simulasi atau belum disubmit)' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const provider = new JsonRpcProvider(chain.rpcUrl, undefined, { staticNetwork: true });
+
+    // Klaim tidak mungkin terjadi sebelum root diregistrasi, jadi pemindaian
+    // dimulai dari blok transaksi `registerPeriode()` — tidak perlu env blok deploy.
+    let dariBlok = this.kursorKlaim.get(periodeId);
+    if (dariBlok === undefined) {
+      const receipt = await provider.getTransactionReceipt(periode.txHash);
+      if (!receipt) {
+        throw new HttpException(
+          {
+            code: 'TX_REGISTRASI_TIDAK_DITEMUKAN',
+            message: `Transaksi registrasi ${periode.txHash} tidak ada di chain ${namaJaringan()} — chain lokal sudah di-reset, atau RPC menunjuk jaringan lain`,
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+      dariBlok = receipt.blockNumber;
+    }
+
+    const blokTerbaru = await provider.getBlockNumber();
+    const kontrak = new Contract(chain.disbursementAddress, DISBURSEMENT_ABI, provider);
+    const filter = kontrak.filters.FundDisbursed(periodeIdNumerik(periodeId));
+    let klaimBaru = 0;
+
+    for (let awal = dariBlok; awal <= blokTerbaru; awal += RENTANG_BLOK_LOG) {
+      const akhir = Math.min(awal + RENTANG_BLOK_LOG - 1, blokTerbaru);
+      const logs = await kontrak.queryFilter(filter, awal, akhir);
+
+      for (const log of logs) {
+        if (!(log instanceof EventLog)) continue;
+        const recipient: string = log.args.recipient;
+        const amount: bigint = log.args.amount;
+
+        const record = await this.prisma.disbursementRecord.findFirst({
+          where: { periodeId, walletAddress: { equals: recipient, mode: 'insensitive' } },
+        });
+        if (!record) {
+          // Kontrak hanya menerima leaf yang ada di root, jadi ini berarti DB sudah
+          // berubah setelah root dikunci. Jangan mengarang record — cukup laporkan.
+          this.logger.warn(`FundDisbursed ${log.transactionHash}: penerima ${recipient} tidak ada di disbursement_record periode ${periodeId}`);
+          continue;
+        }
+        if (record.status === 'claimed') continue;
+        if (BigInt(Math.round(Number(record.amount))) !== amount) {
+          this.logger.warn(
+            `FundDisbursed ${log.transactionHash}: nominal on-chain ${amount} ≠ nominal DB ${record.amount} (${record.reference}) — nilai on-chain yang berlaku`,
+          );
+        }
+
+        const blok = await log.getBlock();
+        await this.prisma.disbursementRecord.update({
+          where: { id: record.id },
+          data: { status: 'claimed', txHash: log.transactionHash, claimedAt: new Date(blok.timestamp * 1000) },
+        });
+        await this.audit.log({
+          action: 'klaim_tersinkron',
+          entityType: 'disbursement_record',
+          entityId: record.id,
+          beforeState: { status: record.status },
+          afterState: { status: 'claimed', txHash: log.transactionHash, submitter: log.args.submitter, amount: amount.toString() },
+        });
+        klaimBaru += 1;
+      }
+
+      this.kursorKlaim.set(periodeId, akhir + 1);
+    }
+
+    const totalClaimed = await this.prisma.disbursementRecord.count({ where: { periodeId, status: 'claimed' } });
+    return {
+      periode_id: periodeId,
+      network: namaJaringan(),
+      disbursement_contract: chain.disbursementAddress,
+      dipindai_sampai_blok: blokTerbaru,
+      klaim_baru: klaimBaru,
+      total_claimed: totalClaimed,
+    };
+  }
 
   /**
    * Build Merkle tree from finalized ranking results.
@@ -91,7 +288,7 @@ export class BlockchainService {
     // lihat rumah-tangga.service.ts create()) > placeholder custodial deterministik untuk baris lama
     // yang dibuat sebelum kolom wallet ada. `rumahTanggaId` disimpan berdampingan (bukan re-derive dari
     // alamat) supaya pencocokan ke DisbursementRecord di bawah tidak bergantung pada skema alamat.
-    const periodeIdNum = parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
+    const periodeIdNum = periodeIdNumerik(periodeId);
     const leaves: (MerkleLeaf & { rumahTanggaId: string; jenisWallet: 'mandiri' | 'custodial' })[] = [];
 
     for (const r of rankings) {
@@ -304,10 +501,14 @@ export class BlockchainService {
       nik_hash: nikHash,
       proof,
       sudah_diklaim: disbursement.status === 'claimed',
-      contract_address:
-        alamatKontrakValid(periode?.contractAddress) ??
-        alamatKontrakValid(process.env.DISBURSEMENT_CONTRACT_ADDRESS) ??
-        null,
+      // Kontrak yang punya `claim()` adalah BansosDisbursement. `periode.contractAddress`
+      // berisi alamat BansosRegistry (hasil `submit-onchain`) — dulu dipakai di sini lebih
+      // dulu, sehingga wallet yang mengikuti respons ini memanggil `claim()` ke Registry
+      // dan selalu revert. Registry tetap dikembalikan terpisah untuk verifikasi root.
+      contract_address: alamatKontrakValid(process.env.DISBURSEMENT_CONTRACT_ADDRESS),
+      registry_address: alamatKontrakValid(periode?.contractAddress),
+      periode_id_onchain: periodeIdNumerik(periodeId),
+      network: namaJaringan(),
     };
   }
 
@@ -332,7 +533,7 @@ export class BlockchainService {
     // periodeId (UUID) -> uint256 numerik: HARUS identik dengan derivasi yang dipakai
     // buildMerkle() saat menghitung leaf, karena claim() di kontrak mem-verifikasi
     // proof terhadap periodeId numerik ini, bukan UUID string-nya.
-    const periodeIdNum = parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
+    const periodeIdNum = periodeIdNumerik(periodeId);
 
     // Periode yang sudah `disbursed` tidak boleh disubmit ulang: root sudah
     // terkunci on-chain, dan menimpa tx_hash akan menghapus jejak transaksi asli.
@@ -406,13 +607,13 @@ export class BlockchainService {
       action: 'submit_onchain',
       entityType: 'periode_program',
       entityId: periodeId,
-      afterState: { txHash, contractAddress, network: 'polygon-amoy', simulated },
+      afterState: { txHash, contractAddress, network: namaJaringan(), simulated },
     });
 
     return {
       tx_hash: txHash,
       contract_address: contractAddress,
-      network: 'polygon-amoy',
+      network: namaJaringan(),
       simulated,
     };
   }
@@ -428,6 +629,14 @@ export class BlockchainService {
     if (!/^0x[0-9a-fA-F]{40}$/.test(registryAddress)) return null;
 
     return { rpcUrl, privateKey, registryAddress };
+  }
+
+  /** Cukup untuk MEMBACA event klaim — tidak butuh private key. */
+  private getClaimChainConfig(): { rpcUrl: string; disbursementAddress: string } | null {
+    const rpcUrl = process.env.RPC_URL;
+    const disbursementAddress = alamatKontrakValid(process.env.DISBURSEMENT_CONTRACT_ADDRESS);
+    if (!rpcUrl || !/^https?:\/\/.+/.test(rpcUrl) || !disbursementAddress) return null;
+    return { rpcUrl, disbursementAddress };
   }
 
   /**
@@ -448,15 +657,18 @@ export class BlockchainService {
       where: { periodeId, status: 'claimed' },
     });
 
+    const explorer = explorerBase();
     return {
       total_recipients: totalRecipients,
       total_claimed: totalClaimed,
       total_pending: totalRecipients - totalClaimed,
-      // Tanpa alamat kontrak (periode masih mode simulasi), tidak ada URL explorer
-      // yang bermakna — `null` supaya UI tidak memasang tautan yang pasti mati.
-      explorer_url: alamatKontrakValid(periode.contractAddress)
-        ? `${explorerBase()}/address/${periode.contractAddress}`
-        : null,
+      // Tanpa alamat kontrak (periode masih mode simulasi) atau tanpa explorer
+      // (chain lokal), tidak ada URL yang bermakna — `null` supaya UI tidak
+      // memasang tautan yang pasti mati.
+      explorer_url:
+        explorer && alamatKontrakValid(periode.contractAddress)
+          ? `${explorer}/address/${periode.contractAddress}`
+          : null,
     };
   }
 }

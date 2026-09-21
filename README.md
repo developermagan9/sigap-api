@@ -76,7 +76,14 @@ Server berjalan di `http://localhost:3001`. Semua route API memiliki prefix `/v1
 Perintah `npm run prisma:seed` membuat akun demo untuk tiap role (admin, verifikator, petugas, auditor, plus satu akun super admin). Lihat kredensialnya langsung di `prisma/seed.ts` — sengaja tidak dicantumkan di README ini karena repo akan bersifat publik.
 
 ## Testing
-Belum ada unit test otomatis di backend (lihat [checklist bagian Testing](../docs/09-Implementation-Checklist.md#8-testing-otomatis)). Verifikasi end-to-end saat ini dilakukan lewat suite Playwright di `sigap-ui/e2e/`, yang memanggil API ini secara langsung.
+```bash
+npm test            # Jest — 137 unit test
+npm run typecheck   # tsc --noEmit
+```
+
+Cakupan: invarian & edge case TOPSIS, determinisme + tie-break ketiga skema alokasi, determinisme/rentang silhouette K-Means, paritas Merkle (`computeLeafHash` vs `abi.encode` Solidity, proof diverifikasi terhadap implementasi acuan OpenZeppelin yang ditulis terpisah), validasi env, penyaringan alamat kontrak, resolusi wilayah Kepmendagri, DTO `finalize-ranking`, batas kewenangan wilayah (`wilayah-scope`), dan perhitungan kolom turunan anggota keluarga.
+
+Verifikasi end-to-end lintas-layanan dilakukan lewat suite Playwright di `sigap-ui/e2e/`, yang memanggil API ini secara langsung.
 
 Cek cepat login manual:
 ```bash
