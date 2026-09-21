@@ -173,8 +173,9 @@ export class RumahTanggaService {
 
     // Dedup discope "per periode program" (03-Data-Model.md §1.1): satu KK yang
     // sama boleh terdaftar lagi di periode berikutnya, tapi tidak dua kali pada
-    // periode yang sama. `periodeId: null` (data lepas) ikut aturan yang sama.
-    const periodeId = dto.periode_id ?? null;
+    // periode yang sama. `periode_id` wajib di DTO, jadi tidak ada lagi data lepas
+    // tanpa periode yang lolos dedup lewat NULL.
+    const periodeId = dto.periode_id;
 
     const existingNik = await this.prisma.rumahTangga.findFirst({
       where: { nikKkHash, periodeId },

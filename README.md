@@ -77,7 +77,7 @@ Perintah `npm run prisma:seed` membuat akun demo untuk tiap role (admin, verifik
 
 ## Testing
 ```bash
-npm test            # Jest — 137 unit test
+npm test            # Jest — 140 unit test
 npm run typecheck   # tsc --noEmit
 ```
 
