@@ -103,11 +103,12 @@ export class CreateRumahTanggaDto {
   @Type(() => AnggotaDto)
   anggota: AnggotaDto[];
 
-  // Optional: link to a program period
-  @IsOptional()
-  @IsUUID()
-  @ApiProperty({ required: false })
-  periode_id?: string;
+  // Wajib: dedup NIK/No. KK discope per periode, dan unique index Postgres
+  // menganggap NULL selalu berbeda — baris tanpa periode tidak pernah benar-benar
+  // terlindungi dari duplikat. Form pendataan & import CSV selalu mengirimnya.
+  @IsUUID('all', { message: 'periode_id wajib diisi (UUID periode program)' })
+  @ApiProperty({ description: 'Periode program tempat rumah tangga ini didata' })
+  periode_id: string;
 
   // Wallet penerima — dikumpulkan di sini alih-alih di-derive palsu saat build-merkle
   // (lihat blockchain.service.ts). 'mandiri' butuh wallet_address; kalau kosong dan
