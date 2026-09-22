@@ -181,8 +181,11 @@ model RumahTangga {
   // Wallet penerima dikumpulkan saat pendataan — dipakai langsung sebagai `recipient`
   // saat build-merkle, menggantikan alamat palsu yang sebelumnya di-derive dari hash NIK.
   // `mandiri` = wallet milik penerima sendiri; `custodial` = dikelola pendamping desa
-  // (lihat 07-Security-Privacy-Ethics.md §6). Nullable karena belum wajib di seluruh alur —
-  // fallback custodial deterministik tetap ada di blockchain.service.ts bila kosong.
+  // (lihat 07-Security-Privacy-Ethics.md §6). Wajib untuk baris baru sejak 2026-09-22
+  // (`CreateRumahTanggaDto.wallet_address` tidak lagi opsional) — kolom ini tetap
+  // nullable di skema hanya supaya baris LAMA yang dibuat sebelum aturan ini berlaku
+  // tetap sah; fallback custodial deterministik di blockchain.service.ts hanya
+  // dipicu untuk baris lama itu, tidak bisa lagi terjadi dari jalur create().
   walletAddress           String?          @map("wallet_address") @db.VarChar(42)
   jenisWallet             WalletType?      @map("jenis_wallet")
   // Hasil assignment K-Means terakhir untuk baris ini (05-Algorithm-Design.md §3).

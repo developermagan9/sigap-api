@@ -12,7 +12,6 @@ import {
   decrypt,
   normalizeName,
   jaroWinkler,
-  deriveCustodialWallet,
 } from '../common/crypto.util';
 import {
   PenggunaBerwilayah,
@@ -228,17 +227,11 @@ export class RumahTanggaService {
 
     const flaggedDuplicate = await this.cekMiripAdaYangSama(namaNorm, alamatNorm);
 
-    // Wallet dikumpulkan di sini (bukan di-derive palsu nanti saat build-merkle).
-    // 'mandiri' butuh alamat asli dari DTO; 'custodial' tanpa alamat dapat placeholder
-    // deterministik — perlu id baris ditentukan dulu supaya bisa jadi seed derivasinya.
+    // Wallet wajib sejak 2026-09-22 — DTO sudah menolak baris tanpa wallet_address
+    // asli sebelum sampai sini, jadi tidak ada lagi derivasi custodial di jalur ini.
     const rumahTanggaId = randomUUID();
-    let walletAddress = dto.wallet_address ?? null;
-    let jenisWallet = dto.jenis_wallet ?? null;
-    if (jenisWallet === 'custodial' && !walletAddress) {
-      walletAddress = deriveCustodialWallet(rumahTanggaId);
-    } else if (walletAddress && !jenisWallet) {
-      jenisWallet = 'mandiri';
-    }
+    const walletAddress = dto.wallet_address;
+    const jenisWallet = dto.jenis_wallet ?? 'mandiri';
 
     const result = await this.prisma.$transaction(async (tx) => {
       const rt = await tx.rumahTangga.create({
@@ -256,8 +249,8 @@ export class RumahTanggaService {
           flaggedDuplicate,
           statusVerifikasi: 'pending',
           periodeId: dto.periode_id,
-          walletAddress: walletAddress ?? undefined,
-          jenisWallet: (jenisWallet as any) ?? undefined,
+          walletAddress,
+          jenisWallet: jenisWallet as 'mandiri',
           pii: {
             create: {
               nikKepalaKeluargaEnc: nikEnc,
@@ -342,7 +335,7 @@ export class RumahTanggaService {
    *   no_kk, nik_kepala_keluarga, nama_kepala_keluarga, alamat_detail,
    *   wilayah_id | kode_wilayah | desa, pendapatan_per_kapita, skor_kondisi_rumah,
    *   skor_akses_pendidikan, riwayat_bansos_sebelumnya,
-   *   wallet_address?, jenis_wallet?,
+   *   wallet_address (wajib, hanya dibaca dari baris kepala), jenis_wallet?,
    *   nik?, nama?, hubungan, tanggal_lahir, status_disabilitas, is_tanggungan
    * (`nik`/`nama` boleh kosong di baris kepala — diambil dari kolom kepala keluarga.)
    *
