@@ -24,7 +24,7 @@ export class RumahTanggaController {
   @Post()
   @Roles('petugas', 'admin')
   create(@Body() dto: CreateRumahTanggaDto, @Request() req: any) {
-    return this.rumahTanggaService.create(dto, req.user?.id);
+    return this.rumahTanggaService.create(dto, req.user?.id, req.user);
   }
 
   @Post('import')
@@ -50,7 +50,7 @@ export class RumahTanggaController {
         HttpStatus.BAD_REQUEST,
       );
     }
-    return this.rumahTanggaService.importCsv(file.buffer, req.user?.id, periodeId);
+    return this.rumahTanggaService.importCsv(file.buffer, req.user?.id, periodeId, req.user);
   }
 
   @Patch(':id/verifikasi')

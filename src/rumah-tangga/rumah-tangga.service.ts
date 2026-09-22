@@ -17,6 +17,8 @@ import {
   PenggunaBerwilayah,
   filterWilayah,
   bolehAksesWilayah,
+  daftarWilayah,
+  tanpaBatasWilayah,
 } from '../common/wilayah-scope';
 import { CreateRumahTanggaDto } from './dto/create-rumah-tangga.dto';
 import { VerifikasiDto } from './dto/verifikasi.dto';
@@ -138,6 +140,69 @@ export class RumahTanggaService {
   ) {}
 
   /**
+   * Data baru hanya boleh masuk ke periode yang masih `draft`: begitu clustering
+   * jalan, baris yang ditambahkan belakangan tidak pernah ikut dihitung dan
+   * tertinggal `pending` selamanya di periode yang sudah dialokasikan.
+   */
+  private async pastikanPeriodePendataan(periodeId: string) {
+    const periode = await this.prisma.periodeProgram.findUnique({
+      where: { id: periodeId },
+      select: { status: true, namaProgram: true },
+    });
+    if (!periode) {
+      throw new HttpException(
+        { error: { code: 'PERIODE_TIDAK_DITEMUKAN', message: `Periode ${periodeId} tidak ditemukan` } },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    if (periode.status !== 'draft') {
+      throw new HttpException(
+        {
+          error: {
+            code: 'PERIODE_BUKAN_PENDATAAN',
+            message: `Periode "${periode.namaProgram}" sudah berstatus '${periode.status}' — pendataan hanya bisa dilakukan pada periode berstatus 'draft'.`,
+          },
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+  }
+
+  /**
+   * Wilayah tujuan data baru. Non-admin hanya boleh mendata di wilayah
+   * kewenangannya — tanpa ini petugas bisa menyimpan KK di desa yang kemudian
+   * tidak bisa ia lihat di riwayatnya sendiri, dan tidak ada verifikator
+   * wilayahnya yang melihatnya di antrean. Dicek SEBELUM `pastikanWilayahKerja()`
+   * supaya penolakan tidak meninggalkan baris `wilayah` baru.
+   */
+  private async resolusiWilayahCreate(dto: CreateRumahTanggaDto, user?: PenggunaBerwilayah): Promise<string> {
+    if (tanpaBatasWilayah(user)) {
+      return dto.wilayah_id ?? (await this.wilayah.pastikanWilayahKerja(dto.kode_wilayah!)).id;
+    }
+    const wilayahId =
+      dto.wilayah_id ??
+      (await this.prisma.wilayah.findUnique({ where: { kode: dto.kode_wilayah!.trim() }, select: { id: true } }))?.id;
+    if (wilayahId && bolehAksesWilayah(user, wilayahId)) return wilayahId;
+
+    const milik = await this.prisma.wilayah.findMany({
+      where: { id: { in: daftarWilayah(user!) } },
+      select: { desa: true, kode: true },
+    });
+    const daftar = milik.map((w) => `${w.desa} (${w.kode})`).join(', ');
+    throw new HttpException(
+      {
+        error: {
+          code: 'WILAYAH_DI_LUAR_KEWENANGAN',
+          message: daftar
+            ? `Desa ini di luar wilayah kerja Anda. Wilayah kerja Anda: ${daftar}. Minta admin menambahkan wilayah di menu Pengguna.`
+            : 'Akun Anda belum punya wilayah kerja. Minta admin menambahkannya di menu Pengguna.',
+        },
+      },
+      HttpStatus.FORBIDDEN,
+    );
+  }
+
+  /**
    * Simpan satu rumah tangga (dedup + turunan + enkripsi PII + audit).
    *
    * Dipakai BERSAMA oleh submit tunggal `POST /rumah-tangga` dan import CSV
@@ -149,7 +214,7 @@ export class RumahTanggaService {
    * (DUPLICATE_NIK / DUPLICATE_NO_KK / DUPLICATE_NIK_ANGGOTA / BAD_REQUEST)
    * supaya importer bisa melaporkan alasan gagal per baris.
    */
-  async create(dto: CreateRumahTanggaDto, actorId?: string) {
+  async create(dto: CreateRumahTanggaDto, actorId?: string, user?: PenggunaBerwilayah) {
     // Alamat administratif datang sebagai kode desa Kepmendagri dari form
     // pendataan; barisnya dibuat sekali per desa di sini (menu "Wilayah Kerja"
     // yang dulu mendaftarkannya lebih dulu sudah dihapus). `wilayah_id` tetap
@@ -165,7 +230,8 @@ export class RumahTanggaService {
         HttpStatus.BAD_REQUEST,
       );
     }
-    const wilayahId = dto.wilayah_id ?? (await this.wilayah.pastikanWilayahKerja(dto.kode_wilayah!)).id;
+    await this.pastikanPeriodePendataan(dto.periode_id);
+    const wilayahId = await this.resolusiWilayahCreate(dto, user);
 
     const nikKkHash = hashWithPepper(dto.nik_kepala_keluarga);
     const noKkHash = hashWithPepper(dto.no_kk);
@@ -342,7 +408,7 @@ export class RumahTanggaService {
    * **Satu baris gagal TIDAK menggagalkan seluruh file** (09-Pembagian-Tugas.md A1):
    * tiap kelompok diproses sendiri-sendiri dan hasilnya dilaporkan per baris.
    */
-  async importCsv(buffer: Buffer, actorId?: string, periodeIdDefault?: string) {
+  async importCsv(buffer: Buffer, actorId?: string, periodeIdDefault?: string, user?: PenggunaBerwilayah) {
     let records: Record<string, string>[];
     try {
       records = parseCsv(buffer, {
@@ -427,8 +493,8 @@ export class RumahTanggaService {
 
     for (const k of kelompok.values()) {
       try {
-        const dto = await this.bangunDtoDariCsv(k.rows, petaWilayah, periodeIdDefault);
-        const dibuat = await this.create(dto, actorId);
+        const dto = await this.bangunDtoDariCsv(k.rows, petaWilayah, periodeIdDefault, user);
+        const dibuat = await this.create(dto, actorId, user);
         hasil.push({
           baris: k.baris,
           no_kk: k.noKk,
@@ -469,6 +535,7 @@ export class RumahTanggaService {
     rows: Record<string, string>[],
     peta: PetaWilayah,
     periodeIdDefault?: string,
+    user?: PenggunaBerwilayah,
   ): Promise<CreateRumahTanggaDto> {
     // Baris kepala jadi sumber kolom rumah tangga; kalau tidak ada, pakai baris pertama.
     const barisKepala = rows.find((r) => (r['hubungan'] ?? '').trim().toLowerCase() === 'kepala') ?? rows[0];
@@ -478,7 +545,9 @@ export class RumahTanggaService {
     // aturan `desa` (nama) di resolusiWilayah sengaja TIDAK ikut dilonggarkan:
     // nama desa tidak unik, dan menebak memindahkan satu KK ke wilayah lain.
     const kodeCsv = (barisKepala['kode_wilayah'] ?? '').trim();
-    if (kodeCsv && !(barisKepala['wilayah_id'] ?? '').trim() && !peta.byKode.has(kodeCsv)) {
+    // Hanya admin yang boleh memicu pembuatan baris wilayah baru; untuk petugas,
+    // desa yang belum ada pasti di luar kewenangannya dan ditolak di create().
+    if (kodeCsv && !(barisKepala['wilayah_id'] ?? '').trim() && !peta.byKode.has(kodeCsv) && tanpaBatasWilayah(user)) {
       const baru = await this.wilayah.pastikanWilayahKerja(kodeCsv);
       peta.byKode.set(kodeCsv, baru.id);
       const kunci = baru.desa.toLowerCase();
