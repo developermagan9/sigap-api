@@ -33,7 +33,7 @@
     "@nestjs/throttler": "^6.5.0",
     "@openzeppelin/merkle-tree": "^1.0.7",
     "@prisma/client": "^5.22.0",
-    "bcrypt": "^5.1.1",
+    "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "csv-parse": "^7.0.2",
@@ -57,5 +57,9 @@
     "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "multer": "^2.4.0",
+    "uuid": "^11.1.1"
   }
 }
