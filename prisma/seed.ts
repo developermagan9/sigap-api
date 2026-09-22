@@ -26,8 +26,14 @@ async function main() {
     { id: 'f6a7b8c9-d0e1-4f2a-bb4c-5d6e7f8a9b0c', kode: '35.07.24.2013' }, // Ardimulyo, Singosari
   ];
 
+  // Desa contoh di form, contoh CSV, dan suite e2e (Balecatur, Gamping, Sleman).
+  // Petugas hanya boleh mendata di wilayah kewenangannya, jadi akun demo diberi
+  // akses tambahan ke desa ini (lihat blok user_wilayah di bawah). Di-upsert by
+  // kode, bukan id: di database lama barisnya sudah dibuat pastikanWilayahKerja().
+  const KODE_DESA_DEMO = '34.04.01.2001';
+
   const kodeJalur = new Set<string>();
-  for (const w of wilayahs) {
+  for (const w of [...wilayahs, { kode: KODE_DESA_DEMO }]) {
     const [p, k, c] = w.kode.split('.');
     kodeJalur.add(p);
     kodeJalur.add(`${p}.${k}`);
@@ -53,15 +59,19 @@ async function main() {
     );
   }
 
-  for (const w of wilayahs) {
-    const [p, k, c] = w.kode.split('.');
-    const data = {
-      kode: w.kode,
+  const dataWilayah = (kode: string) => {
+    const [p, k, c] = kode.split('.');
+    return {
+      kode,
       provinsi: referensi.get(p)!,
       kabupaten: referensi.get(`${p}.${k}`)!,
       kecamatan: referensi.get(`${p}.${k}.${c}`)!,
-      desa: referensi.get(w.kode)!,
+      desa: referensi.get(kode)!,
     };
+  };
+
+  for (const w of wilayahs) {
+    const data = dataWilayah(w.kode);
     // `update` sengaja diisi (bukan `{}`): menjalankan ulang seed pada database
     // lama harus ikut memperbaiki nama-nama karangan yang sudah terlanjur ada.
     await prisma.wilayah.upsert({
@@ -70,6 +80,12 @@ async function main() {
       create: { id: w.id, ...data },
     });
   }
+
+  const desaDemo = await prisma.wilayah.upsert({
+    where: { kode: KODE_DESA_DEMO },
+    update: dataWilayah(KODE_DESA_DEMO),
+    create: dataWilayah(KODE_DESA_DEMO),
+  });
 
   // 2. Seed Users
   const users = [
@@ -125,6 +141,15 @@ async function main() {
         wilayahId: (u as { wilayahId?: string }).wilayahId ?? null,
       },
       create: u,
+    });
+  }
+
+  for (const username of ['petugas', 'verifikator']) {
+    const u = await prisma.user.findUniqueOrThrow({ where: { username } });
+    await prisma.userWilayah.upsert({
+      where: { userId_wilayahId: { userId: u.id, wilayahId: desaDemo.id } },
+      update: {},
+      create: { userId: u.id, wilayahId: desaDemo.id },
     });
   }
 
