@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Param,
   Body,
   UseGuards,
@@ -62,6 +63,15 @@ export class PeriodeProgramController {
     @Request() req: any,
   ) {
     return this.periodeProgramService.update(id, dto, req.user?.id);
+  }
+
+  @Delete(':id')
+  @Roles('admin')
+  @ApiOperation({ summary: 'Hapus periode draft yang belum berisi data rumah tangga' })
+  @ApiResponse({ status: 409, description: 'Periode sudah berisi data rumah tangga' })
+  @ApiResponse({ status: 422, description: 'Periode bukan draft' })
+  remove(@Param('id') id: string, @Request() req: any) {
+    return this.periodeProgramService.remove(id, req.user?.id);
   }
 
   @Get(':id/summary')

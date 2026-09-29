@@ -11,11 +11,6 @@ import { PublicService } from './public.service';
 export class PublicController {
   constructor(private readonly publicService: PublicService) {}
 
-  @Get('disbursement-summary')
-  getDisbursementSummary() {
-    return this.publicService.getDisbursementSummary();
-  }
-
   @Get('programs')
   @ApiOperation({ summary: 'Daftar program/periode yang sudah disahkan' })
   getPrograms() {

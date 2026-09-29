@@ -5,6 +5,7 @@ import { KMeansService, LABEL_KERENTANAN } from './kmeans.service';
 import { TopsisService, KriteriaSpec } from './topsis.service';
 import { AlokasiService, KandidatAlokasi } from './alokasi.service';
 import { PeriodeProgramService } from '../periode-program/periode-program.service';
+import { NotifikasiService } from '../notifikasi/notifikasi.service';
 
 export const KRITERIA_DEFAULT: KriteriaSpec[] = [
   { key: 'pendapatanPerKapita', label: 'Pendapatan per kapita', benefit: false },
@@ -63,6 +64,7 @@ export class MiningService {
     private topsis: TopsisService,
     private alokasi: AlokasiService,
     private periodeProgramService: PeriodeProgramService,
+    private notifikasi: NotifikasiService,
   ) {}
 
   /**
@@ -627,10 +629,78 @@ export class MiningService {
       );
     });
 
+    await this.notifikasi.kirimKeRole(
+      ['admin'],
+      {
+        judul: 'Daftar penerima disahkan',
+        pesan: `Daftar final "${periode.namaProgram}" disahkan (${periode.kuotaPenerima} penerima). Lanjutkan ke Penyaluran On-chain.`,
+        entityType: 'periode_program',
+        entityId: periodeId,
+      },
+      approvedBy,
+    );
+
     return {
       status: 'approved',
       catatan_approval: catatan,
       approved_by: approvedBy,
     };
+  }
+
+  /**
+   * Batalkan pengesahan: `reviewed|approved -> alokasi`. Hanya selama Merkle root
+   * belum dikirim on-chain — setelah itu root terkunci di kontrak dan membatalkan
+   * di DB saja akan membuat DB tidak lagi cocok dengan chain. Ranking kembali
+   * `draft`, Merkle root & record disbursement (semuanya masih `pending`) dibuang,
+   * sehingga tahap data mining bisa dijalankan ulang.
+   */
+  async batalkanApproval(periodeId: string, actorId: string, alasan: string) {
+    const periode = await this.prisma.periodeProgram.findUnique({ where: { id: periodeId } });
+    if (!periode) {
+      throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
+    }
+    if (periode.status !== 'approved' && periode.status !== 'reviewed') {
+      throw new HttpException(
+        { code: 'TRANSISI_TIDAK_VALID', message: `Hanya periode yang sudah disahkan (belum disalurkan) yang bisa dibatalkan — status sekarang '${periode.status}'` },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    if (periode.txHash) {
+      throw new HttpException(
+        { code: 'SUDAH_DISUBMIT', message: 'Merkle root sudah dikirim on-chain; pengesahan tidak bisa dibatalkan' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.rankingResult.updateMany({ where: { periodeId, status: 'final' }, data: { status: 'draft' } });
+      const { count: recordDihapus } = await tx.disbursementRecord.deleteMany({ where: { periodeId, status: 'pending' } });
+      await tx.periodeProgram.update({ where: { id: periodeId }, data: { merkleRoot: null } });
+      await this.periodeProgramService.updateStatus(periodeId, 'alokasi', actorId, tx);
+      await this.audit.log(
+        {
+          actorId,
+          action: 'BATALKAN_APPROVAL',
+          entityType: 'periode_program',
+          entityId: periodeId,
+          beforeState: { status: periode.status, merkleRoot: periode.merkleRoot },
+          afterState: { status: 'alokasi', alasan, recordDisbursementDihapus: recordDihapus },
+        },
+        tx,
+      );
+    });
+
+    await this.notifikasi.kirimKeRole(
+      ['admin'],
+      {
+        judul: 'Pengesahan dibatalkan',
+        pesan: `Pengesahan "${periode.namaProgram}" dibatalkan: ${alasan}`,
+        entityType: 'periode_program',
+        entityId: periodeId,
+      },
+      actorId,
+    );
+
+    return { status: 'alokasi', alasan };
   }
 }

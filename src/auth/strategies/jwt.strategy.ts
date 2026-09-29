@@ -8,6 +8,10 @@ export interface JwtPayload {
   sub: string;
   username: string;
   role: string;
+  /** tokenVersion user saat token ditandatangani. */
+  tv?: number;
+  jti?: string;
+  exp?: number;
 }
 
 @Injectable()
@@ -37,6 +41,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Pengguna tidak ditemukan atau tidak aktif');
     }
+    // Token dicabut (logout, ganti/reset password, dinonaktifkan) dengan menaikkan
+    // tokenVersion. Token lama tanpa `tv` diperlakukan sebagai versi 0.
+    if ((payload.tv ?? 0) !== user.tokenVersion) {
+      throw new UnauthorizedException('Sesi sudah berakhir, silakan login ulang');
+    }
+    if (payload.jti && (await this.prisma.revokedToken.findUnique({ where: { jti: payload.jti }, select: { jti: true } }))) {
+      throw new UnauthorizedException('Sesi sudah berakhir, silakan login ulang');
+    }
 
     return {
       id: user.id,
@@ -48,6 +60,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         ...new Set([user.wilayahId, ...user.wilayahAkses.map((w) => w.wilayahId)].filter(Boolean)),
       ] as string[],
       nama: user.nama,
+      jti: payload.jti,
+      exp: payload.exp,
     };
   }
 }

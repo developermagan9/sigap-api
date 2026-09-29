@@ -30,7 +30,7 @@ function buat(statusPeriode: string | null, wilayahByKode: Record<string, string
     $transaction: jest.fn(),
   };
   const wilayahSvc = { pastikanWilayahKerja: jest.fn().mockResolvedValue({ id: 'baru' }) };
-  const service = new RumahTanggaService(prisma as any, {} as any, wilayahSvc as any);
+  const service = new RumahTanggaService(prisma as any, {} as any, wilayahSvc as any, {} as any);
   return { service, prisma, wilayahSvc };
 }
 

@@ -43,6 +43,7 @@ describe('MiningService.finalizeRanking — atomik', () => {
       {} as any,
       {} as any,
       periodeProgramService as any,
+      { kirimKeRole: jest.fn() } as any,
     );
     return { service, prisma, tx, periodeProgramService, audit };
   }

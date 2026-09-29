@@ -1,6 +1,7 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { NotifikasiService } from '../notifikasi/notifikasi.service';
 import { hashWithPepper, encrypt } from '../common/crypto.util';
 import {
   PenggunaBerwilayah,
@@ -28,6 +29,7 @@ export class SanggahanService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifikasi: NotifikasiService,
   ) {}
 
   async create(rumahTanggaId: string, dto: CreateSanggahanDto, actorId: string) {
@@ -63,6 +65,17 @@ export class SanggahanService {
       entityId: request.id,
       afterState: request,
     });
+
+    await this.notifikasi.kirimKePeninjauWilayah(
+      rt.wilayahId,
+      {
+        judul: 'Sanggahan data baru',
+        pesan: `Ada sanggahan baru untuk rumah tangga ${rumahTanggaId.slice(0, 8)}: ${dto.alasan}`,
+        entityType: 'sanggahan_request',
+        entityId: request.id,
+      },
+      actorId,
+    );
 
     return request;
   }
@@ -191,6 +204,17 @@ export class SanggahanService {
       beforeState,
       afterState: dto.status === 'diterima' ? request.dataBaru : { catatan: dto.catatan },
     });
+
+    if (request.diajukanOlehId !== actorId) {
+      await this.notifikasi.kirim({
+        kanal: 'in_app',
+        userId: request.diajukanOlehId,
+        judul: dto.status === 'diterima' ? 'Sanggahan diterima' : 'Sanggahan ditolak',
+        pesan: `Sanggahan untuk rumah tangga ${request.rumahTanggaId.slice(0, 8)} ${dto.status}${dto.catatan ? `: ${dto.catatan}` : '.'}`,
+        entityType: 'sanggahan_request',
+        entityId: id,
+      });
+    }
 
     return updated;
   }

@@ -6,6 +6,7 @@ import { validate } from 'class-validator';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { WilayahService } from '../wilayah/wilayah.service';
+import { NotifikasiService } from '../notifikasi/notifikasi.service';
 import {
   hashWithPepper,
   encrypt,
@@ -137,6 +138,7 @@ export class RumahTanggaService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly wilayah: WilayahService,
+    private readonly notifikasi: NotifikasiService,
   ) {}
 
   /**
@@ -792,6 +794,21 @@ export class RumahTanggaService {
         catatan: dto.catatan ?? null,
       },
     });
+
+    if (rt.statusVerifikasi !== updated.statusVerifikasi && updated.statusVerifikasi !== 'pending') {
+      const pembuat = await this.notifikasi.pembuatRumahTangga(id);
+      if (pembuat && pembuat !== actorId) {
+        const diterima = updated.statusVerifikasi === 'verified';
+        await this.notifikasi.kirim({
+          kanal: 'in_app',
+          userId: pembuat,
+          judul: diterima ? 'Data rumah tangga terverifikasi' : 'Data rumah tangga ditolak',
+          pesan: `Data yang Anda input (${id.slice(0, 8)}) ${diterima ? 'lolos verifikasi' : 'ditolak verifikator'}${dto.catatan ? `: ${dto.catatan}` : '.'}`,
+          entityType: 'rumah_tangga',
+          entityId: id,
+        });
+      }
+    }
 
     return updated;
   }

@@ -238,13 +238,15 @@ export class PeriodeProgramService {
       );
     }
 
+    // `reviewed|approved -> alokasi` hanya dipakai MiningService.batalkanApproval():
+    // pengesahan dibatalkan selama daftar belum dikunci on-chain.
     const validTransitions: Record<string, string[]> = {
       draft: ['clustering'],
       clustering: ['ranking'],
       ranking: ['alokasi'],
       alokasi: ['reviewed'],
-      reviewed: ['approved'],
-      approved: ['disbursed'],
+      reviewed: ['approved', 'alokasi'],
+      approved: ['disbursed', 'alokasi'],
       disbursed: [],
     };
 
@@ -283,6 +285,50 @@ export class PeriodeProgramService {
     }
 
     return updated;
+  }
+
+  /**
+   * Hapus periode yang masih `draft` dan belum berisi data rumah tangga — untuk
+   * periode yang salah dibuat atau periode uji. Periode yang sudah berisi data atau
+   * sudah melewati draft tidak boleh dihapus: jejaknya bagian dari akuntabilitas.
+   */
+  async remove(id: string, actorId?: string) {
+    const periode = await this.prisma.periodeProgram.findUnique({
+      where: { id },
+      include: { _count: { select: { rumahTangga: true } } },
+    });
+    if (!periode) {
+      throw new HttpException(
+        { code: 'TIDAK_DITEMUKAN', message: `Periode program dengan ID '${id}' tidak ditemukan` },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    if (periode.status !== 'draft') {
+      throw new HttpException(
+        { code: 'PERIODE_TERKUNCI', message: `Hanya periode berstatus draft yang bisa dihapus (status sekarang: ${periode.status})` },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    if (periode._count.rumahTangga > 0) {
+      throw new HttpException(
+        {
+          code: 'PERIODE_BERISI_DATA',
+          message: `Periode ini sudah berisi ${periode._count.rumahTangga} data rumah tangga dan tidak bisa dihapus`,
+          details: { jumlah_rumah_tangga: periode._count.rumahTangga },
+        },
+        HttpStatus.CONFLICT,
+      );
+    }
+    const { _count, ...snapshot } = periode;
+    await this.prisma.periodeProgram.delete({ where: { id } });
+    await this.audit.log({
+      actorId,
+      action: 'DELETE_PERIODE_PROGRAM',
+      entityType: 'periode_program',
+      entityId: id,
+      beforeState: snapshot,
+    });
+    return { id, dihapus: true };
   }
 
   /**
