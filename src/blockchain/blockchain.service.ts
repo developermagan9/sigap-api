@@ -1,14 +1,51 @@
-import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MerkleService, MerkleLeaf } from './merkle.service';
 import { PeriodeProgramService } from '../periode-program/periode-program.service';
-import { keccak256, toUtf8Bytes, Contract, Wallet, JsonRpcProvider } from 'ethers';
+import { NotifikasiService } from '../notifikasi/notifikasi.service';
+import { keccak256, toUtf8Bytes, Contract, EventLog, Wallet, JsonRpcProvider, NonceManager } from 'ethers';
 import { deriveCustodialWallet } from '../common/crypto.util';
 
-/** Basis URL block explorer; jaringan bisa berganti, jadi tidak di-hardcode. */
-function explorerBase(): string {
-  return process.env.EXPLORER_BASE_URL || 'https://amoy.polygonscan.com';
+const CHAIN_ID_HARDHAT = 31337;
+
+/** Chain id aktif; default Polygon Amoy sesuai 06-Smart-Contract-Design.md §2. */
+function chainIdAktif(): number {
+  const n = Number(process.env.CHAIN_ID);
+  return Number.isInteger(n) && n > 0 ? n : 80002;
+}
+
+/**
+ * Basis URL block explorer; jaringan bisa berganti, jadi tidak di-hardcode.
+ * Chain lokal Hardhat tidak punya explorer — `null` supaya tidak ada tautan
+ * Polygonscan ke alamat yang hanya ada di laptop developer.
+ */
+export function explorerBase(): string | null {
+  if (process.env.EXPLORER_BASE_URL) return process.env.EXPLORER_BASE_URL;
+  return chainIdAktif() === CHAIN_ID_HARDHAT ? null : 'https://amoy.polygonscan.com';
+}
+
+/** Nama jaringan untuk respons API & audit log, diturunkan dari CHAIN_ID. */
+export function namaJaringan(chainId: number = chainIdAktif()): string {
+  switch (chainId) {
+    case 80002:
+      return 'polygon-amoy';
+    case 137:
+      return 'polygon';
+    case CHAIN_ID_HARDHAT:
+      return 'hardhat-local';
+    default:
+      return `chain-${chainId}`;
+  }
+}
+
+/**
+ * periodeId (UUID) -> uint256 numerik yang dipakai kontrak. Leaf Merkle,
+ * `registerPeriode()`, dan event `FundDisbursed` semuanya memakai angka ini —
+ * ketiganya HARUS memakai derivasi yang sama persis.
+ */
+export function periodeIdNumerik(periodeId: string): number {
+  return parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
 }
 
 /**
@@ -29,17 +66,204 @@ export function alamatKontrakValid(alamat: string | null | undefined): string | 
 const REGISTRY_ABI = [
   'function registerPeriode(uint256 periodeId, bytes32 merkleRoot, uint256 totalAlokasi) external',
 ];
+const DISBURSEMENT_ABI = [
+  'event FundDisbursed(uint256 indexed periodeId, address indexed recipient, address indexed submitter, uint256 amount, bytes32 nikHash)',
+  'function saldoPeriode(uint256 periodeId) view returns (uint256)',
+  'function depositDana(uint256 periodeId, uint256 amount) external',
+  'function batasKlaim(uint256 periodeId) view returns (uint256)',
+  'function setBatasKlaim(uint256 periodeId, uint256 batas) external',
+  'function tarikSisaDana(uint256 periodeId, address tujuan) external',
+  'event SisaDanaDitarik(uint256 indexed periodeId, address indexed tujuan, uint256 amount)',
+];
+const ERC20_ABI = [
+  'function balanceOf(address owner) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+/** Rentang blok per `eth_getLogs` — RPC publik Amoy menolak rentang yang terlalu lebar. */
+const RENTANG_BLOK_LOG = 5_000;
 
 @Injectable()
-export class BlockchainService {
+export class BlockchainService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BlockchainService.name);
+
+  /**
+   * periodeId -> blok pertama yang belum dipindai untuk event klaim, terikat pada tx
+   * registrasinya: kalau periode diregistrasi ulang (chain lokal di-reset), kursor
+   * lama tidak boleh dipakai karena blok registrasi yang baru bisa lebih rendah.
+   * Hilang saat restart; dipindai ulang dari blok registrasi.
+   */
+  private readonly kursorKlaim = new Map<string, { txHash: string; blok: number }>();
+  private timerSinkron?: NodeJS.Timeout;
+  private sedangSinkron = false;
+  /** Pesan gagal terakhir per periode — supaya poller tidak mengulang peringatan yang sama tiap tick. */
+  private readonly galatSinkronTerakhir = new Map<string, string>();
 
   constructor(
     private prisma: PrismaService,
     private audit: AuditService,
     private merkle: MerkleService,
     private periodeProgramService: PeriodeProgramService,
+    private notifikasi: NotifikasiService,
   ) {}
+
+  /**
+   * Poller sinkronisasi klaim. Klaim dikirim langsung ke kontrak oleh warga/relayer,
+   * bukan lewat API, jadi satu-satunya cara backend tahu ada klaim adalah membaca
+   * event `FundDisbursed`. `CLAIM_SYNC_INTERVAL_MS=0` mematikannya.
+   */
+  onModuleInit() {
+    const interval = Number(process.env.CLAIM_SYNC_INTERVAL_MS ?? 30_000);
+    if (!this.getClaimChainConfig() || !(interval > 0)) return;
+    this.timerSinkron = setInterval(() => void this.sinkronSemuaPeriode(), interval);
+    this.timerSinkron.unref();
+    this.logger.log(`Sinkronisasi klaim on-chain aktif, tiap ${interval} ms`);
+  }
+
+  onModuleDestroy() {
+    if (this.timerSinkron) clearInterval(this.timerSinkron);
+  }
+
+  private async sinkronSemuaPeriode() {
+    if (this.sedangSinkron) return;
+    this.sedangSinkron = true;
+    try {
+      const periodes = await this.prisma.periodeProgram.findMany({
+        where: { status: 'disbursed', txHash: { not: null }, contractAddress: { not: null } },
+        select: { id: true },
+      });
+      for (const { id } of periodes) {
+        try {
+          await this.syncKlaim(id);
+          this.galatSinkronTerakhir.delete(id);
+        } catch (err) {
+          const pesan = err instanceof HttpException ? JSON.stringify(err.getResponse()) : String(err);
+          if (this.galatSinkronTerakhir.get(id) !== pesan) {
+            this.logger.warn(`Sinkronisasi klaim periode ${id} gagal: ${pesan}`);
+            this.galatSinkronTerakhir.set(id, pesan);
+          }
+        }
+      }
+    } finally {
+      this.sedangSinkron = false;
+    }
+  }
+
+  /**
+   * Tarik event `FundDisbursed` periode ini dari kontrak disbursement dan tandai
+   * `disbursement_record` yang cocok sebagai `claimed`. Idempoten: record yang sudah
+   * `claimed` dilewati, jadi aman dipanggil berulang (poller + tombol manual).
+   */
+  async syncKlaim(periodeId: string) {
+    const chain = this.getClaimChainConfig();
+    if (!chain) {
+      throw new HttpException(
+        {
+          code: 'KONTRAK_BELUM_DIKONFIGURASI',
+          message: 'RPC_URL / DISBURSEMENT_CONTRACT_ADDRESS belum diisi — tidak ada kontrak untuk dibaca',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const periode = await this.prisma.periodeProgram.findUnique({ where: { id: periodeId } });
+    if (!periode) {
+      throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
+    }
+    if (!alamatKontrakValid(periode.contractAddress) || !periode.txHash) {
+      throw new HttpException(
+        { code: 'BELUM_ONCHAIN', message: 'Periode ini belum diregistrasi on-chain (masih simulasi atau belum disubmit)' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const provider = new JsonRpcProvider(chain.rpcUrl, undefined, { staticNetwork: true });
+
+    // Klaim tidak mungkin terjadi sebelum root diregistrasi, jadi pemindaian
+    // dimulai dari blok transaksi `registerPeriode()` — tidak perlu env blok deploy.
+    const kursor = this.kursorKlaim.get(periodeId);
+    let dariBlok = kursor?.txHash === periode.txHash ? kursor.blok : undefined;
+    if (dariBlok === undefined) {
+      const receipt = await provider.getTransactionReceipt(periode.txHash);
+      if (!receipt) {
+        throw new HttpException(
+          {
+            code: 'TX_REGISTRASI_TIDAK_DITEMUKAN',
+            message: `Transaksi registrasi ${periode.txHash} tidak ada di chain ${namaJaringan()} — chain lokal sudah di-reset, atau RPC menunjuk jaringan lain`,
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+      dariBlok = receipt.blockNumber;
+    }
+
+    const blokTerbaru = await provider.getBlockNumber();
+    const kontrak = new Contract(chain.disbursementAddress, DISBURSEMENT_ABI, provider);
+    const filter = kontrak.filters.FundDisbursed(periodeIdNumerik(periodeId));
+    let klaimBaru = 0;
+
+    for (let awal = dariBlok; awal <= blokTerbaru; awal += RENTANG_BLOK_LOG) {
+      const akhir = Math.min(awal + RENTANG_BLOK_LOG - 1, blokTerbaru);
+      const logs = await kontrak.queryFilter(filter, awal, akhir);
+
+      for (const log of logs) {
+        if (!(log instanceof EventLog)) continue;
+        const recipient: string = log.args.recipient;
+        const amount: bigint = log.args.amount;
+
+        const record = await this.prisma.disbursementRecord.findFirst({
+          where: { periodeId, walletAddress: { equals: recipient, mode: 'insensitive' } },
+        });
+        if (!record) {
+          // Kontrak hanya menerima leaf yang ada di root, jadi ini berarti DB sudah
+          // berubah setelah root dikunci. Jangan mengarang record — cukup laporkan.
+          this.logger.warn(`FundDisbursed ${log.transactionHash}: penerima ${recipient} tidak ada di disbursement_record periode ${periodeId}`);
+          continue;
+        }
+        if (record.status === 'claimed') continue;
+        if (BigInt(Math.round(Number(record.amount))) !== amount) {
+          this.logger.warn(
+            `FundDisbursed ${log.transactionHash}: nominal on-chain ${amount} ≠ nominal DB ${record.amount} (${record.reference}) — nilai on-chain yang berlaku`,
+          );
+        }
+
+        const blok = await log.getBlock();
+        await this.prisma.disbursementRecord.update({
+          where: { id: record.id },
+          data: { status: 'claimed', txHash: log.transactionHash, claimedAt: new Date(blok.timestamp * 1000) },
+        });
+        await this.audit.log({
+          action: 'klaim_tersinkron',
+          entityType: 'disbursement_record',
+          entityId: record.id,
+          beforeState: { status: record.status },
+          afterState: { status: 'claimed', txHash: log.transactionHash, submitter: log.args.submitter, amount: amount.toString() },
+        });
+        await this.notifikasi.kirim({
+          kanal: 'sms_mock',
+          tujuan: record.reference,
+          judul: 'Dana bansos diterima',
+          pesan: `Dana ${amount} untuk ${record.reference} sudah masuk ke wallet ${recipient}. Tx: ${log.transactionHash}`,
+          entityType: 'disbursement_record',
+          entityId: record.id,
+        });
+        klaimBaru += 1;
+      }
+
+      this.kursorKlaim.set(periodeId, { txHash: periode.txHash, blok: akhir + 1 });
+    }
+
+    const totalClaimed = await this.prisma.disbursementRecord.count({ where: { periodeId, status: 'claimed' } });
+    return {
+      periode_id: periodeId,
+      network: namaJaringan(),
+      disbursement_contract: chain.disbursementAddress,
+      dipindai_sampai_blok: blokTerbaru,
+      klaim_baru: klaimBaru,
+      total_claimed: totalClaimed,
+    };
+  }
 
   /**
    * Build Merkle tree from finalized ranking results.
@@ -91,7 +315,7 @@ export class BlockchainService {
     // lihat rumah-tangga.service.ts create()) > placeholder custodial deterministik untuk baris lama
     // yang dibuat sebelum kolom wallet ada. `rumahTanggaId` disimpan berdampingan (bukan re-derive dari
     // alamat) supaya pencocokan ke DisbursementRecord di bawah tidak bergantung pada skema alamat.
-    const periodeIdNum = parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
+    const periodeIdNum = periodeIdNumerik(periodeId);
     const leaves: (MerkleLeaf & { rumahTanggaId: string; jenisWallet: 'mandiri' | 'custodial' })[] = [];
 
     for (const r of rankings) {
@@ -304,10 +528,19 @@ export class BlockchainService {
       nik_hash: nikHash,
       proof,
       sudah_diklaim: disbursement.status === 'claimed',
-      contract_address:
-        alamatKontrakValid(periode?.contractAddress) ??
-        alamatKontrakValid(process.env.DISBURSEMENT_CONTRACT_ADDRESS) ??
-        null,
+      // Kontrak yang punya `claim()` adalah BansosDisbursement. `periode.contractAddress`
+      // berisi alamat BansosRegistry (hasil `submit-onchain`) — dulu dipakai di sini lebih
+      // dulu, sehingga wallet yang mengikuti respons ini memanggil `claim()` ke Registry
+      // dan selalu revert. Registry tetap dikembalikan terpisah untuk verifikasi root.
+      contract_address: alamatKontrakValid(process.env.DISBURSEMENT_CONTRACT_ADDRESS),
+      registry_address: alamatKontrakValid(periode?.contractAddress),
+      periode_id_onchain: periodeIdNumerik(periodeId),
+      chain_id: chainIdAktif(),
+      network: namaJaringan(),
+      jenis_wallet: disbursement.jenisWallet,
+      status: disbursement.status,
+      batas_klaim: periode?.batasKlaim?.toISOString() ?? null,
+      klaim_ditutup: Boolean(periode?.klaimDitutupAt) || Boolean(periode?.batasKlaim && periode.batasKlaim.getTime() < Date.now()),
     };
   }
 
@@ -332,7 +565,7 @@ export class BlockchainService {
     // periodeId (UUID) -> uint256 numerik: HARUS identik dengan derivasi yang dipakai
     // buildMerkle() saat menghitung leaf, karena claim() di kontrak mem-verifikasi
     // proof terhadap periodeId numerik ini, bukan UUID string-nya.
-    const periodeIdNum = parseInt(periodeId.replace(/-/g, '').substring(0, 8), 16) % 1_000_000;
+    const periodeIdNum = periodeIdNumerik(periodeId);
 
     // Periode yang sudah `disbursed` tidak boleh disubmit ulang: root sudah
     // terkunci on-chain, dan menimpa tx_hash akan menghapus jejak transaksi asli.
@@ -406,13 +639,30 @@ export class BlockchainService {
       action: 'submit_onchain',
       entityType: 'periode_program',
       entityId: periodeId,
-      afterState: { txHash, contractAddress, network: 'polygon-amoy', simulated },
+      afterState: { txHash, contractAddress, network: namaJaringan(), simulated },
     });
+
+    if (!simulated) {
+      const penerima = await this.prisma.disbursementRecord.findMany({
+        where: { periodeId, status: 'pending', jenisWallet: 'mandiri' },
+        select: { id: true, reference: true, amount: true },
+      });
+      await this.notifikasi.kirim(
+        penerima.map((r) => ({
+          kanal: 'sms_mock' as const,
+          tujuan: r.reference,
+          judul: 'Dana bansos siap diklaim',
+          pesan: `${periode.namaProgram}: dana Rp${Number(r.amount).toLocaleString('id-ID')} untuk ${r.reference} siap diklaim di menu Cek Status.`,
+          entityType: 'disbursement_record',
+          entityId: r.id,
+        })),
+      );
+    }
 
     return {
       tx_hash: txHash,
       contract_address: contractAddress,
-      network: 'polygon-amoy',
+      network: namaJaringan(),
       simulated,
     };
   }
@@ -428,6 +678,293 @@ export class BlockchainService {
     if (!/^0x[0-9a-fA-F]{40}$/.test(registryAddress)) return null;
 
     return { rpcUrl, privateKey, registryAddress };
+  }
+
+  /**
+   * Danai kontrak disbursement untuk periode ini dari wallet admin: approve +
+   * `depositDana()` sebesar kekurangannya. Kebutuhan = Σ nominal penerima yang belum
+   * klaim − saldo periode on-chain; klaim disinkronkan dulu supaya klaim yang belum
+   * tercatat tidak membuat kontrak didanai dua kali.
+   */
+  async danaiKontrak(periodeId: string, actorId?: string) {
+    const chain = this.getChainConfig();
+    const claimChain = this.getClaimChainConfig();
+    const tokenAddress = alamatKontrakValid(process.env.DANA_TOKEN_ADDRESS);
+    if (!chain || !claimChain || !tokenAddress) {
+      throw new HttpException(
+        {
+          code: 'KONTRAK_BELUM_DIKONFIGURASI',
+          message: 'Butuh RPC_URL, ADMIN_PRIVATE_KEY, DISBURSEMENT_CONTRACT_ADDRESS, dan DANA_TOKEN_ADDRESS',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    // Sekaligus memvalidasi periode sudah diregistrasi on-chain (melempar kalau belum).
+    await this.syncKlaim(periodeId);
+    await this.tolakJikaKlaimDitutup(periodeId);
+
+    const provider = new JsonRpcProvider(chain.rpcUrl, undefined, { staticNetwork: true });
+    // approve lalu depositDana dikirim berurutan dari wallet yang sama. Tanpa
+    // NonceManager, ethers membaca ulang nonce dari cache request provider yang
+    // belum kedaluwarsa dan transaksi kedua ditolak "nonce too low".
+    const wallet = new NonceManager(new Wallet(chain.privateKey, provider));
+    const alamatAdmin = await wallet.getAddress();
+    const kontrak = new Contract(claimChain.disbursementAddress, DISBURSEMENT_ABI, wallet);
+    const token = new Contract(tokenAddress, ERC20_ABI, wallet);
+    const idOnchain = periodeIdNumerik(periodeId);
+
+    const { saldo, kebutuhan } = await this.hitungDanaOnchain(periodeId, kontrak);
+    const kekurangan = kebutuhan - saldo;
+    if (kekurangan <= 0n) {
+      return { periode_id: periodeId, sudah_cukup: true, deposit: 0, saldo_kontrak: Number(saldo), kebutuhan: Number(kebutuhan), tx_hash: null };
+    }
+
+    const saldoAdmin: bigint = await token.balanceOf(alamatAdmin);
+    if (saldoAdmin < kekurangan) {
+      throw new HttpException(
+        {
+          code: 'SALDO_TOKEN_KURANG',
+          message: `Wallet admin ${alamatAdmin} hanya memegang ${saldoAdmin} token, butuh ${kekurangan}`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const allowance: bigint = await token.allowance(alamatAdmin, claimChain.disbursementAddress);
+    if (allowance < kekurangan) {
+      await (await token.approve(claimChain.disbursementAddress, kekurangan)).wait();
+    }
+    const receipt = await (await kontrak.depositDana(idOnchain, kekurangan)).wait();
+
+    await this.audit.log({
+      actorId,
+      action: 'danai_kontrak',
+      entityType: 'periode_program',
+      entityId: periodeId,
+      afterState: { txHash: receipt.hash, amount: kekurangan.toString(), network: namaJaringan() },
+    });
+
+    return {
+      periode_id: periodeId,
+      sudah_cukup: true,
+      deposit: Number(kekurangan),
+      saldo_kontrak: Number(saldo + kekurangan),
+      kebutuhan: Number(kebutuhan),
+      tx_hash: receipt.hash,
+    };
+  }
+
+  private async tolakJikaKlaimDitutup(periodeId: string) {
+    const p = await this.prisma.periodeProgram.findUnique({ where: { id: periodeId }, select: { batasKlaim: true, klaimDitutupAt: true } });
+    if (p?.klaimDitutupAt || (p?.batasKlaim && p.batasKlaim.getTime() < Date.now())) {
+      throw new HttpException(
+        { code: 'MASA_KLAIM_BERAKHIR', message: 'Masa klaim periode ini sudah berakhir' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+  }
+
+  /** Wallet admin + kontrak disbursement yang bisa menulis, untuk periode yang sudah on-chain. */
+  private async kontrakTulis(periodeId: string) {
+    const chain = this.getChainConfig();
+    const claimChain = this.getClaimChainConfig();
+    if (!chain || !claimChain) {
+      throw new HttpException(
+        { code: 'KONTRAK_BELUM_DIKONFIGURASI', message: 'Butuh RPC_URL, ADMIN_PRIVATE_KEY, dan DISBURSEMENT_CONTRACT_ADDRESS' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    const periode = await this.prisma.periodeProgram.findUnique({ where: { id: periodeId } });
+    if (!periode) {
+      throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);
+    }
+    if (!alamatKontrakValid(periode.contractAddress) || !periode.txHash) {
+      throw new HttpException(
+        { code: 'BELUM_ONCHAIN', message: 'Periode ini belum diregistrasi on-chain (masih simulasi atau belum disubmit)' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    const provider = new JsonRpcProvider(chain.rpcUrl, undefined, { staticNetwork: true });
+    const wallet = new NonceManager(new Wallet(chain.privateKey, provider));
+    return { periode, provider, wallet, kontrak: new Contract(claimChain.disbursementAddress, DISBURSEMENT_ABI, wallet) };
+  }
+
+  /** Revert kontrak -> 422 dengan alasan dari `require()`, bukan 500. */
+  private galatKontrak(err: any): never {
+    const alasan = err?.reason ?? err?.shortMessage ?? String(err);
+    throw new HttpException({ code: 'TRANSAKSI_DITOLAK_KONTRAK', message: alasan }, HttpStatus.UNPROCESSABLE_ENTITY);
+  }
+
+  /**
+   * Tetapkan/perpanjang batas waktu klaim on-chain. Setelah batas lewat klaim ditolak
+   * kontrak dan sisa dana bisa ditarik lewat `tarikSisaDana()`.
+   */
+  async setBatasKlaim(periodeId: string, batas: Date, actorId?: string) {
+    if (Number.isNaN(batas.getTime())) {
+      throw new HttpException({ code: 'VALIDASI_GAGAL', message: 'Tanggal batas klaim tidak valid' }, HttpStatus.BAD_REQUEST);
+    }
+    const { periode, provider, kontrak } = await this.kontrakTulis(periodeId);
+    if (periode.klaimDitutupAt) {
+      throw new HttpException({ code: 'MASA_KLAIM_BERAKHIR', message: 'Klaim periode ini sudah ditutup' }, HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+    // Pembanding memakai waktu blok, bukan jam server: di chain lokal waktu blok bisa
+    // sudah dimajukan (evm_increaseTime) dan kontrak menilai dengan waktu blok.
+    const blok = await provider.getBlock('latest');
+    const unix = Math.floor(batas.getTime() / 1000);
+    if (blok && unix <= blok.timestamp) {
+      throw new HttpException(
+        { code: 'VALIDASI_GAGAL', message: `Batas klaim harus setelah waktu chain saat ini (${new Date(blok.timestamp * 1000).toISOString()})` },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const lama: bigint = await kontrak.batasKlaim(periodeIdNumerik(periodeId));
+    if (lama > 0n && BigInt(unix) <= lama) {
+      throw new HttpException(
+        { code: 'VALIDASI_GAGAL', message: `Batas klaim hanya boleh diperpanjang (sekarang ${new Date(Number(lama) * 1000).toISOString()})` },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    let receipt: any;
+    try {
+      receipt = await (await kontrak.setBatasKlaim(periodeIdNumerik(periodeId), unix)).wait();
+    } catch (err) {
+      this.galatKontrak(err);
+    }
+    const batasTersimpan = new Date(unix * 1000);
+    await this.prisma.periodeProgram.update({ where: { id: periodeId }, data: { batasKlaim: batasTersimpan } });
+    await this.audit.log({
+      actorId,
+      action: 'set_batas_klaim',
+      entityType: 'periode_program',
+      entityId: periodeId,
+      beforeState: { batasKlaim: periode.batasKlaim },
+      afterState: { batasKlaim: batasTersimpan, txHash: receipt.hash },
+    });
+
+    const pending = await this.prisma.disbursementRecord.findMany({
+      where: { periodeId, status: 'pending', jenisWallet: 'mandiri' },
+      select: { id: true, reference: true },
+    });
+    const tanggal = batasTersimpan.toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short', timeZone: 'Asia/Jakarta' });
+    await this.notifikasi.kirim(
+      pending.map((r) => ({
+        kanal: 'sms_mock' as const,
+        tujuan: r.reference,
+        judul: 'Batas waktu klaim bansos',
+        pesan: `${periode.namaProgram}: klaim dana untuk ${r.reference} paling lambat ${tanggal} WIB. Setelah itu dana dikembalikan ke kas.`,
+        entityType: 'disbursement_record',
+        entityId: r.id,
+      })),
+    );
+
+    return { periode_id: periodeId, batas_klaim: batasTersimpan.toISOString(), tx_hash: receipt.hash };
+  }
+
+  /**
+   * Tarik sisa dana periode setelah batas klaim lewat. Klaim yang belum masuk
+   * disinkronkan dulu; record yang tetap `pending` ditandai `failed` (tidak diklaim
+   * sampai batas waktu) — satu-satunya jalur yang mengisi status itu.
+   */
+  async tarikSisaDana(periodeId: string, tujuan: string | undefined, actorId?: string) {
+    const { periode, provider, wallet, kontrak } = await this.kontrakTulis(periodeId);
+    if (periode.klaimDitutupAt) {
+      throw new HttpException(
+        { code: 'SUDAH_DITARIK', message: `Klaim sudah ditutup dan sisa dana sudah ditarik${periode.txTarikSisa ? ` (tx ${periode.txTarikSisa})` : ''}` },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    const idOnchain = periodeIdNumerik(periodeId);
+    const batas: bigint = await kontrak.batasKlaim(idOnchain);
+    const blok = await provider.getBlock('latest');
+    if (batas === 0n || !blok || BigInt(blok.timestamp) <= batas) {
+      throw new HttpException(
+        {
+          code: 'MASA_KLAIM_BELUM_BERAKHIR',
+          message: batas === 0n ? 'Batas klaim belum ditetapkan' : `Masa klaim baru berakhir ${new Date(Number(batas) * 1000).toISOString()}`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    const alamatTujuan = tujuan ? alamatKontrakValid(tujuan) : await wallet.getAddress();
+    if (!alamatTujuan) {
+      throw new HttpException({ code: 'VALIDASI_GAGAL', message: 'Alamat tujuan tidak valid' }, HttpStatus.BAD_REQUEST);
+    }
+
+    // Klaim yang terjadi sebelum batas tapi belum tercatat tidak boleh ikut ditandai gagal.
+    await this.syncKlaim(periodeId);
+
+    let receipt: any;
+    let jumlah = 0n;
+    const saldo: bigint = await kontrak.saldoPeriode(idOnchain);
+    if (saldo > 0n) {
+      try {
+        receipt = await (await kontrak.tarikSisaDana(idOnchain, alamatTujuan)).wait();
+      } catch (err) {
+        this.galatKontrak(err);
+      }
+      jumlah = saldo;
+    }
+
+    const tidakDiklaim = await this.prisma.disbursementRecord.findMany({
+      where: { periodeId, status: 'pending' },
+      select: { id: true, reference: true },
+    });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.disbursementRecord.updateMany({ where: { periodeId, status: 'pending' }, data: { status: 'failed' } });
+      await tx.periodeProgram.update({
+        where: { id: periodeId },
+        data: { klaimDitutupAt: new Date(), txTarikSisa: receipt?.hash ?? null, sisaDanaDitarik: Number(jumlah), batasKlaim: new Date(Number(batas) * 1000) },
+      });
+      await this.audit.log(
+        {
+          actorId,
+          action: 'tarik_sisa_dana',
+          entityType: 'periode_program',
+          entityId: periodeId,
+          afterState: { txHash: receipt?.hash ?? null, amount: jumlah.toString(), tujuan: alamatTujuan, recordTidakDiklaim: tidakDiklaim.length },
+        },
+        tx,
+      );
+    });
+    await this.notifikasi.kirim(
+      tidakDiklaim.map((r) => ({
+        kanal: 'sms_mock' as const,
+        tujuan: r.reference,
+        judul: 'Masa klaim bansos berakhir',
+        pesan: `${periode.namaProgram}: dana untuk ${r.reference} tidak diklaim sampai batas waktu dan dikembalikan ke kas.`,
+        entityType: 'disbursement_record',
+        entityId: r.id,
+      })),
+    );
+
+    return {
+      periode_id: periodeId,
+      tx_hash: receipt?.hash ?? null,
+      jumlah_ditarik: Number(jumlah),
+      tujuan: alamatTujuan,
+      record_tidak_diklaim: tidakDiklaim.length,
+    };
+  }
+
+  /** Saldo periode di kontrak vs Σ nominal penerima yang belum klaim (unit token). */
+  private async hitungDanaOnchain(periodeId: string, kontrak: Contract) {
+    const saldo: bigint = await kontrak.saldoPeriode(periodeIdNumerik(periodeId));
+    const pending = await this.prisma.disbursementRecord.findMany({
+      where: { periodeId, status: 'pending' },
+      select: { amount: true },
+    });
+    const kebutuhan = pending.reduce((s, r) => s + BigInt(Math.round(Number(r.amount))), 0n);
+    return { saldo, kebutuhan };
+  }
+
+  /** Cukup untuk MEMBACA event klaim — tidak butuh private key. */
+  private getClaimChainConfig(): { rpcUrl: string; disbursementAddress: string } | null {
+    const rpcUrl = process.env.RPC_URL;
+    const disbursementAddress = alamatKontrakValid(process.env.DISBURSEMENT_CONTRACT_ADDRESS);
+    if (!rpcUrl || !/^https?:\/\/.+/.test(rpcUrl) || !disbursementAddress) return null;
+    return { rpcUrl, disbursementAddress };
   }
 
   /**
@@ -447,16 +984,43 @@ export class BlockchainService {
     const totalClaimed = await this.prisma.disbursementRecord.count({
       where: { periodeId, status: 'claimed' },
     });
+    const totalFailed = await this.prisma.disbursementRecord.count({
+      where: { periodeId, status: 'failed' },
+    });
 
+    // Saldo on-chain hanya bermakna untuk periode yang benar-benar diregistrasi;
+    // RPC mati tidak boleh membuat endpoint status ikut gagal.
+    let danaOnchain: { saldo_kontrak: number; kebutuhan: number; cukup: boolean } | null = null;
+    const claimChain = this.getClaimChainConfig();
+    if (claimChain && alamatKontrakValid(periode.contractAddress)) {
+      try {
+        const provider = new JsonRpcProvider(claimChain.rpcUrl, undefined, { staticNetwork: true });
+        const kontrak = new Contract(claimChain.disbursementAddress, DISBURSEMENT_ABI, provider);
+        const { saldo, kebutuhan } = await this.hitungDanaOnchain(periodeId, kontrak);
+        danaOnchain = { saldo_kontrak: Number(saldo), kebutuhan: Number(kebutuhan), cukup: saldo >= kebutuhan };
+      } catch (err) {
+        this.logger.warn(`Gagal membaca saldo kontrak periode ${periodeId}: ${err}`);
+      }
+    }
+
+    const explorer = explorerBase();
     return {
+      dana_onchain: danaOnchain,
       total_recipients: totalRecipients,
       total_claimed: totalClaimed,
-      total_pending: totalRecipients - totalClaimed,
-      // Tanpa alamat kontrak (periode masih mode simulasi), tidak ada URL explorer
-      // yang bermakna — `null` supaya UI tidak memasang tautan yang pasti mati.
-      explorer_url: alamatKontrakValid(periode.contractAddress)
-        ? `${explorerBase()}/address/${periode.contractAddress}`
-        : null,
+      total_failed: totalFailed,
+      total_pending: totalRecipients - totalClaimed - totalFailed,
+      batas_klaim: periode.batasKlaim?.toISOString() ?? null,
+      klaim_ditutup: Boolean(periode.klaimDitutupAt),
+      sisa_dana_ditarik: periode.sisaDanaDitarik === null ? null : Number(periode.sisaDanaDitarik),
+      tx_tarik_sisa: periode.txTarikSisa,
+      // Tanpa alamat kontrak (periode masih mode simulasi) atau tanpa explorer
+      // (chain lokal), tidak ada URL yang bermakna — `null` supaya UI tidak
+      // memasang tautan yang pasti mati.
+      explorer_url:
+        explorer && alamatKontrakValid(periode.contractAddress)
+          ? `${explorer}/address/${periode.contractAddress}`
+          : null,
     };
   }
 }

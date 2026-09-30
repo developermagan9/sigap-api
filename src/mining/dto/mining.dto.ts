@@ -1,14 +1,9 @@
-import { IsNumber, IsOptional, IsArray, IsObject, IsString, IsEnum, IsUUID, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsArray, IsObject, IsString, IsEnum, IsUUID, Min, MinLength } from 'class-validator';
 
 export class RunClusteringDto {
   @IsNumber()
   @IsOptional()
   k?: number;
-
-  @IsArray()
-  @IsString({ each: true })
-  @IsOptional()
-  fitur?: string[];
 }
 
 export class RunTopsisDto {
@@ -64,4 +59,10 @@ export class FinalizeRankingDto {
 
   @IsString()
   catatan: string;
+}
+
+export class BatalkanApprovalDto {
+  @IsString()
+  @MinLength(5, { message: 'Alasan pembatalan minimal 5 karakter' })
+  alasan: string;
 }

@@ -1,6 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { keccak256, AbiCoder, concat, toBeHex, zeroPadValue } from 'ethers';
+import { Injectable } from '@nestjs/common';
+import { keccak256, AbiCoder, concat } from 'ethers';
 
 export interface MerkleLeaf {
   recipient: string;
@@ -18,7 +17,6 @@ export interface Invarian {
 
 @Injectable()
 export class MerkleService {
-  private readonly logger = new Logger(MerkleService.name);
   private readonly abiCoder = AbiCoder.defaultAbiCoder();
 
   /**

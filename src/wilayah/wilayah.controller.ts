@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards, ParseUUIDPipe } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -25,10 +25,6 @@ export class WilayahController {
     return this.wilayahService.findAll();
   }
 
-  // CATATAN URUTAN: dua rute `referensi` HARUS dideklarasikan sebelum `:id`.
-  // Nest mencocokkan rute sesuai urutan deklarasi, dan `:id` memakai
-  // ParseUUIDPipe — kalau ia lebih dulu, `/wilayah/referensi` akan ditangkap
-  // olehnya dan ditolak 400 "bukan UUID" alih-alih sampai ke handler ini.
   @Get('referensi/cari')
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles(UserRole.admin, UserRole.petugas)
@@ -61,11 +57,4 @@ export class WilayahController {
     return this.wilayahService.referensi(query.induk);
   }
 
-  @Get(':id')
-  @ApiOperation({ summary: 'Dapatkan detail wilayah kerja berdasarkan ID' })
-  @ApiResponse({ status: 200, description: 'Detail wilayah ditemukan' })
-  @ApiResponse({ status: 404, description: 'Wilayah tidak ditemukan' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.wilayahService.findOne(id);
-  }
 }

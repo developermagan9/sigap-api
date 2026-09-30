@@ -46,12 +46,6 @@ function encKey(): Buffer {
   return encKeyCache;
 }
 
-/** Hanya untuk test: buang cache supaya perubahan env ikut terbaca. */
-export function resetKunciCache(): void {
-  pepperCache = null;
-  encKeyCache = null;
-}
-
 /**
  * SHA-256 hash with system pepper.
  * Used for NIK, No. KK hashing to prevent rainbow table attacks on 16-digit NIK space.
@@ -90,13 +84,22 @@ export function encrypt(plaintext: string): Buffer {
 
 /**
  * AES-256-CBC decrypt for PII retrieval.
+ *
+ * Potongan hasil dekripsi digabung sebagai Buffer dulu, baru sekali di-decode
+ * utf8. Versi sebelumnya menulis `decipher.update(encrypted) + decipher.final('utf8')`:
+ * `update()` tanpa encoding mengembalikan Buffer, dan operator `+` memaksanya
+ * lewat `Buffer.toString()` sendiri — sehingga satu karakter multibyte (mis. `é`
+ * pada nama, atau tanda kutip melengkung yang lazim ter-paste dari Word ke kolom
+ * alamat) yang kebetulan terbelah di batas antara `update` dan `final` didecode
+ * sebagai dua potongan terpisah dan keluar rusak jadi `�`. Tidak pernah terlihat
+ * selama ini karena fungsi ini belum pernah dipanggil di mana pun.
  */
 export function decrypt(data: Buffer): string {
   const key = encKey();
   const iv = data.subarray(0, 16);
   const encrypted = data.subarray(16);
   const decipher = createDecipheriv(ALGORITHM, key, iv);
-  return decipher.update(encrypted) + decipher.final('utf8');
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
 }
 
 /**

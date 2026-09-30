@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { parse as parseCsv } from 'csv-parse/sync';
 import { plainToInstance } from 'class-transformer';
@@ -6,9 +6,57 @@ import { validate } from 'class-validator';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { WilayahService } from '../wilayah/wilayah.service';
-import { hashWithPepper, encrypt, normalizeName, jaroWinkler, deriveCustodialWallet } from '../common/crypto.util';
+import { NotifikasiService } from '../notifikasi/notifikasi.service';
+import {
+  hashWithPepper,
+  encrypt,
+  decrypt,
+  normalizeName,
+  jaroWinkler,
+} from '../common/crypto.util';
+import {
+  PenggunaBerwilayah,
+  filterWilayah,
+  bolehAksesWilayah,
+  daftarWilayah,
+  tanpaBatasWilayah,
+} from '../common/wilayah-scope';
 import { CreateRumahTanggaDto } from './dto/create-rumah-tangga.dto';
 import { VerifikasiDto } from './dto/verifikasi.dto';
+
+/** Umur (tahun) sejak kapan seorang anggota dihitung lansia untuk kriteria kerentanan. */
+const UMUR_LANSIA = 60;
+
+/** Satu anggota keluarga sebagaimana diterima DTO (create maupun koreksi sanggahan). */
+export type AnggotaInput = {
+  tanggal_lahir: string;
+  status_disabilitas: boolean;
+  is_tanggungan: boolean;
+};
+
+/**
+ * Kolom turunan `RumahTangga` yang dihitung dari daftar anggota keluarga.
+ *
+ * Diekstrak jadi fungsi sendiri supaya jalur create dan jalur koreksi lewat
+ * sanggahan menghasilkan angka yang sama persis — kalau aturannya (mis. ambang
+ * lansia) berubah di satu tempat saja, dua rumah tangga dengan susunan anggota
+ * identik bisa berakhir dengan skor kerentanan berbeda hanya karena yang satu
+ * masuk lewat form dan yang lain lewat sanggahan.
+ */
+export function hitungTurunanAnggota(anggota: AnggotaInput[], sekarang = new Date()) {
+  const jumlahTanggungan = anggota.filter((a) => a.is_tanggungan).length;
+
+  const jumlahDisabilitasLansia = anggota.filter((a) => {
+    if (a.status_disabilitas) return true;
+    const lahir = new Date(a.tanggal_lahir);
+    let umur = sekarang.getUTCFullYear() - lahir.getUTCFullYear();
+    const bulan = sekarang.getUTCMonth() - lahir.getUTCMonth();
+    if (bulan < 0 || (bulan === 0 && sekarang.getUTCDate() < lahir.getUTCDate())) umur--;
+    return umur >= UMUR_LANSIA;
+  }).length;
+
+  return { jumlahTanggungan, jumlahDisabilitasLansia };
+}
 
 /** Ambang Jaro-Winkler untuk menandai kemungkinan duplikat "lunak" (nama+alamat mirip). */
 const AMBANG_MIRIP = 0.85;
@@ -90,7 +138,71 @@ export class RumahTanggaService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly wilayah: WilayahService,
+    private readonly notifikasi: NotifikasiService,
   ) {}
+
+  /**
+   * Data baru hanya boleh masuk ke periode yang masih `draft`: begitu clustering
+   * jalan, baris yang ditambahkan belakangan tidak pernah ikut dihitung dan
+   * tertinggal `pending` selamanya di periode yang sudah dialokasikan.
+   */
+  private async pastikanPeriodePendataan(periodeId: string) {
+    const periode = await this.prisma.periodeProgram.findUnique({
+      where: { id: periodeId },
+      select: { status: true, namaProgram: true },
+    });
+    if (!periode) {
+      throw new HttpException(
+        { error: { code: 'PERIODE_TIDAK_DITEMUKAN', message: `Periode ${periodeId} tidak ditemukan` } },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    if (periode.status !== 'draft') {
+      throw new HttpException(
+        {
+          error: {
+            code: 'PERIODE_BUKAN_PENDATAAN',
+            message: `Periode "${periode.namaProgram}" sudah berstatus '${periode.status}' — pendataan hanya bisa dilakukan pada periode berstatus 'draft'.`,
+          },
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+  }
+
+  /**
+   * Wilayah tujuan data baru. Non-admin hanya boleh mendata di wilayah
+   * kewenangannya — tanpa ini petugas bisa menyimpan KK di desa yang kemudian
+   * tidak bisa ia lihat di riwayatnya sendiri, dan tidak ada verifikator
+   * wilayahnya yang melihatnya di antrean. Dicek SEBELUM `pastikanWilayahKerja()`
+   * supaya penolakan tidak meninggalkan baris `wilayah` baru.
+   */
+  private async resolusiWilayahCreate(dto: CreateRumahTanggaDto, user?: PenggunaBerwilayah): Promise<string> {
+    if (tanpaBatasWilayah(user)) {
+      return dto.wilayah_id ?? (await this.wilayah.pastikanWilayahKerja(dto.kode_wilayah!)).id;
+    }
+    const wilayahId =
+      dto.wilayah_id ??
+      (await this.prisma.wilayah.findUnique({ where: { kode: dto.kode_wilayah!.trim() }, select: { id: true } }))?.id;
+    if (wilayahId && bolehAksesWilayah(user, wilayahId)) return wilayahId;
+
+    const milik = await this.prisma.wilayah.findMany({
+      where: { id: { in: daftarWilayah(user!) } },
+      select: { desa: true, kode: true },
+    });
+    const daftar = milik.map((w) => `${w.desa} (${w.kode})`).join(', ');
+    throw new HttpException(
+      {
+        error: {
+          code: 'WILAYAH_DI_LUAR_KEWENANGAN',
+          message: daftar
+            ? `Desa ini di luar wilayah kerja Anda. Wilayah kerja Anda: ${daftar}. Minta admin menambahkan wilayah di menu Pengguna.`
+            : 'Akun Anda belum punya wilayah kerja. Minta admin menambahkannya di menu Pengguna.',
+        },
+      },
+      HttpStatus.FORBIDDEN,
+    );
+  }
 
   /**
    * Simpan satu rumah tangga (dedup + turunan + enkripsi PII + audit).
@@ -104,7 +216,7 @@ export class RumahTanggaService {
    * (DUPLICATE_NIK / DUPLICATE_NO_KK / DUPLICATE_NIK_ANGGOTA / BAD_REQUEST)
    * supaya importer bisa melaporkan alasan gagal per baris.
    */
-  async create(dto: CreateRumahTanggaDto, actorId?: string) {
+  async create(dto: CreateRumahTanggaDto, actorId?: string, user?: PenggunaBerwilayah) {
     // Alamat administratif datang sebagai kode desa Kepmendagri dari form
     // pendataan; barisnya dibuat sekali per desa di sini (menu "Wilayah Kerja"
     // yang dulu mendaftarkannya lebih dulu sudah dihapus). `wilayah_id` tetap
@@ -120,15 +232,17 @@ export class RumahTanggaService {
         HttpStatus.BAD_REQUEST,
       );
     }
-    const wilayahId = dto.wilayah_id ?? (await this.wilayah.pastikanWilayahKerja(dto.kode_wilayah!)).id;
+    await this.pastikanPeriodePendataan(dto.periode_id);
+    const wilayahId = await this.resolusiWilayahCreate(dto, user);
 
     const nikKkHash = hashWithPepper(dto.nik_kepala_keluarga);
     const noKkHash = hashWithPepper(dto.no_kk);
 
     // Dedup discope "per periode program" (03-Data-Model.md §1.1): satu KK yang
     // sama boleh terdaftar lagi di periode berikutnya, tapi tidak dua kali pada
-    // periode yang sama. `periodeId: null` (data lepas) ikut aturan yang sama.
-    const periodeId = dto.periode_id ?? null;
+    // periode yang sama. `periode_id` wajib di DTO, jadi tidak ada lagi data lepas
+    // tanpa periode yang lolos dedup lewat NULL.
+    const periodeId = dto.periode_id;
 
     const existingNik = await this.prisma.rumahTangga.findFirst({
       where: { nikKkHash, periodeId },
@@ -169,15 +283,7 @@ export class RumahTanggaService {
       );
     }
 
-    const jumlahTanggungan = dto.anggota.filter((a) => a.is_tanggungan).length;
-
-    const jumlahDisabilitasLansia = dto.anggota.filter((a) => {
-      if (a.status_disabilitas) return true;
-      const dob = new Date(a.tanggal_lahir);
-      const ageDifMs = Date.now() - dob.getTime();
-      const ageDate = new Date(ageDifMs); 
-      return Math.abs(ageDate.getUTCFullYear() - 1970) >= 60;
-    }).length;
+    const { jumlahTanggungan, jumlahDisabilitasLansia } = hitungTurunanAnggota(dto.anggota);
 
     const nikEnc = encrypt(dto.nik_kepala_keluarga);
     const kkEnc = encrypt(dto.no_kk);
@@ -189,17 +295,11 @@ export class RumahTanggaService {
 
     const flaggedDuplicate = await this.cekMiripAdaYangSama(namaNorm, alamatNorm);
 
-    // Wallet dikumpulkan di sini (bukan di-derive palsu nanti saat build-merkle).
-    // 'mandiri' butuh alamat asli dari DTO; 'custodial' tanpa alamat dapat placeholder
-    // deterministik — perlu id baris ditentukan dulu supaya bisa jadi seed derivasinya.
+    // Wallet wajib sejak 2026-09-22 — DTO sudah menolak baris tanpa wallet_address
+    // asli sebelum sampai sini, jadi tidak ada lagi derivasi custodial di jalur ini.
     const rumahTanggaId = randomUUID();
-    let walletAddress = dto.wallet_address ?? null;
-    let jenisWallet = dto.jenis_wallet ?? null;
-    if (jenisWallet === 'custodial' && !walletAddress) {
-      walletAddress = deriveCustodialWallet(rumahTanggaId);
-    } else if (walletAddress && !jenisWallet) {
-      jenisWallet = 'mandiri';
-    }
+    const walletAddress = dto.wallet_address;
+    const jenisWallet = dto.jenis_wallet ?? 'mandiri';
 
     const result = await this.prisma.$transaction(async (tx) => {
       const rt = await tx.rumahTangga.create({
@@ -217,8 +317,8 @@ export class RumahTanggaService {
           flaggedDuplicate,
           statusVerifikasi: 'pending',
           periodeId: dto.periode_id,
-          walletAddress: walletAddress ?? undefined,
-          jenisWallet: (jenisWallet as any) ?? undefined,
+          walletAddress,
+          jenisWallet: jenisWallet as 'mandiri',
           pii: {
             create: {
               nikKepalaKeluargaEnc: nikEnc,
@@ -303,14 +403,14 @@ export class RumahTanggaService {
    *   no_kk, nik_kepala_keluarga, nama_kepala_keluarga, alamat_detail,
    *   wilayah_id | kode_wilayah | desa, pendapatan_per_kapita, skor_kondisi_rumah,
    *   skor_akses_pendidikan, riwayat_bansos_sebelumnya,
-   *   wallet_address?, jenis_wallet?,
+   *   wallet_address (wajib, hanya dibaca dari baris kepala), jenis_wallet?,
    *   nik?, nama?, hubungan, tanggal_lahir, status_disabilitas, is_tanggungan
    * (`nik`/`nama` boleh kosong di baris kepala — diambil dari kolom kepala keluarga.)
    *
    * **Satu baris gagal TIDAK menggagalkan seluruh file** (09-Pembagian-Tugas.md A1):
    * tiap kelompok diproses sendiri-sendiri dan hasilnya dilaporkan per baris.
    */
-  async importCsv(buffer: Buffer, actorId?: string, periodeIdDefault?: string) {
+  async importCsv(buffer: Buffer, actorId?: string, periodeIdDefault?: string, user?: PenggunaBerwilayah) {
     let records: Record<string, string>[];
     try {
       records = parseCsv(buffer, {
@@ -395,8 +495,8 @@ export class RumahTanggaService {
 
     for (const k of kelompok.values()) {
       try {
-        const dto = await this.bangunDtoDariCsv(k.rows, petaWilayah, periodeIdDefault);
-        const dibuat = await this.create(dto, actorId);
+        const dto = await this.bangunDtoDariCsv(k.rows, petaWilayah, periodeIdDefault, user);
+        const dibuat = await this.create(dto, actorId, user);
         hasil.push({
           baris: k.baris,
           no_kk: k.noKk,
@@ -437,6 +537,7 @@ export class RumahTanggaService {
     rows: Record<string, string>[],
     peta: PetaWilayah,
     periodeIdDefault?: string,
+    user?: PenggunaBerwilayah,
   ): Promise<CreateRumahTanggaDto> {
     // Baris kepala jadi sumber kolom rumah tangga; kalau tidak ada, pakai baris pertama.
     const barisKepala = rows.find((r) => (r['hubungan'] ?? '').trim().toLowerCase() === 'kepala') ?? rows[0];
@@ -446,7 +547,9 @@ export class RumahTanggaService {
     // aturan `desa` (nama) di resolusiWilayah sengaja TIDAK ikut dilonggarkan:
     // nama desa tidak unik, dan menebak memindahkan satu KK ke wilayah lain.
     const kodeCsv = (barisKepala['kode_wilayah'] ?? '').trim();
-    if (kodeCsv && !(barisKepala['wilayah_id'] ?? '').trim() && !peta.byKode.has(kodeCsv)) {
+    // Hanya admin yang boleh memicu pembuatan baris wilayah baru; untuk petugas,
+    // desa yang belum ada pasti di luar kewenangannya dan ditolak di create().
+    if (kodeCsv && !(barisKepala['wilayah_id'] ?? '').trim() && !peta.byKode.has(kodeCsv) && tanpaBatasWilayah(user)) {
       const baru = await this.wilayah.pastikanWilayahKerja(kodeCsv);
       peta.byKode.set(kodeCsv, baru.id);
       const kunci = baru.desa.toLowerCase();
@@ -509,17 +612,18 @@ export class RumahTanggaService {
 
   async findAll(
     filters: { wilayah_id?: string; periode_id?: string; status?: string; page?: number; limit?: number },
-    user?: { role?: string; wilayahId?: string | null },
+    user?: PenggunaBerwilayah,
   ) {
     const page = filters.page || 1;
     const limit = filters.limit || 10;
     const skip = (page - 1) * limit;
 
     const where: any = {};
-    if (user && user.role !== 'admin') {
-      // petugas/verifikator can only ever see their own wilayah, regardless of
-      // what wilayah_id was requested in the query string.
-      where.wilayahId = user.wilayahId ?? '__no_wilayah__';
+    // petugas/verifikator hanya pernah melihat wilayah kewenangannya, apa pun isi
+    // query string. Sejak `UserWilayah` ada, "wilayahnya" bisa lebih dari satu.
+    const batas = filterWilayah(user);
+    if (batas) {
+      where.wilayahId = batas;
     } else if (filters.wilayah_id) {
       where.wilayahId = filters.wilayah_id;
     }
@@ -553,11 +657,92 @@ export class RumahTanggaService {
     };
   }
 
+  /**
+   * Detail satu rumah tangga **beserta PII yang didekripsi** (`GET /rumah-tangga/:id`).
+   *
+   * Sampai endpoint ini ada, `decrypt()` tidak pernah dipanggil di mana pun: nama,
+   * alamat, NIK, dan daftar anggota keluarga dikumpulkan lalu terkunci selamanya.
+   * Akibatnya verifikator memutuskan approve/reject hanya dari potongan hash dan
+   * angka skor — tidak ada yang bisa dicocokkan dengan kunjungan lapangan atau
+   * KTP fisik, sehingga "verifikasi" praktis tidak punya objek untuk diverifikasi.
+   *
+   * Tiga pengaman, karena ini satu-satunya jalur PII keluar dari sistem:
+   *  1. RBAC di controller (`admin`/`verifikator`/`petugas` saja),
+   *  2. scoping wilayah yang sama dengan aksi tulis — non-admin di luar
+   *     kewenangannya ditolak `403`, bukan diam-diam diberi baris kosong,
+   *  3. **setiap** pembacaan dicatat audit log `LIHAT_PII`. Akses ke data pribadi
+   *     yang tidak meninggalkan jejak tidak bisa diaudit, dan 07-Security-Privacy-
+   *     Ethics.md §2 justru menuntut jejak itu ada.
+   */
+  async findOne(id: string, actorId?: string, user?: PenggunaBerwilayah) {
+    const rt = await this.prisma.rumahTangga.findUnique({
+      where: { id },
+      include: {
+        wilayah: true,
+        pii: true,
+        anggota: { orderBy: { tanggalLahir: 'asc' } },
+      },
+    });
+
+    if (!rt) {
+      throw new HttpException(
+        { error: { code: 'TIDAK_DITEMUKAN', message: 'Rumah tangga tidak ditemukan' } },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    if (!bolehAksesWilayah(user, rt.wilayahId)) {
+      throw new HttpException(
+        {
+          error: {
+            code: 'AKSES_DITOLAK',
+            message: 'Rumah tangga ini berada di luar wilayah kerja Anda',
+          },
+        },
+        HttpStatus.FORBIDDEN,
+      );
+    }
+
+    await this.audit.log({
+      action: 'LIHAT_PII',
+      actorId,
+      entityId: rt.id,
+      entityType: 'rumah_tangga',
+      // Nilai PII-nya sendiri sengaja TIDAK ikut dicatat — audit log dibaca lewat
+      // `GET /audit-log` oleh auditor yang tidak punya kewenangan wilayah, jadi
+      // menyalin nama/NIK ke sini justru membocorkannya lewat pintu belakang.
+      afterState: { wilayahId: rt.wilayahId, periodeId: rt.periodeId },
+    });
+
+    const { pii, anggota, ...sisa } = rt;
+
+    return {
+      ...sisa,
+      identitas: pii
+        ? {
+            nama_kepala_keluarga: decrypt(pii.namaKepalaKeluargaEnc),
+            nik_kepala_keluarga: decrypt(pii.nikKepalaKeluargaEnc),
+            no_kk: decrypt(pii.noKkEnc),
+            alamat_detail: decrypt(pii.alamatDetailEnc),
+          }
+        : null,
+      anggota: anggota.map((a) => ({
+        id: a.id,
+        nama: decrypt(a.namaEnc),
+        nik: decrypt(a.nikEnc),
+        hubungan: a.hubungan,
+        tanggal_lahir: a.tanggalLahir,
+        status_disabilitas: a.statusDisabilitas,
+        is_tanggungan: a.isTanggungan,
+      })),
+    };
+  }
+
   async verifikasi(
     id: string,
     dto: VerifikasiDto,
     actorId: string,
-    user?: { role?: string; wilayahId?: string | null },
+    user?: PenggunaBerwilayah,
   ) {
     const rt = await this.prisma.rumahTangga.findUnique({
       where: { id },
@@ -575,7 +760,7 @@ export class RumahTanggaService {
     // meng-approve rumah tangga wilayah B kalau id-nya diketahui (id muncul di
     // respons API lain, jadi bukan rahasia). Membatasi baca tanpa membatasi tulis
     // tidak menutup apa pun.
-    if (user && user.role !== 'admin' && rt.wilayahId !== user.wilayahId) {
+    if (!bolehAksesWilayah(user, rt.wilayahId)) {
       throw new HttpException(
         {
           error: {
@@ -609,6 +794,21 @@ export class RumahTanggaService {
         catatan: dto.catatan ?? null,
       },
     });
+
+    if (rt.statusVerifikasi !== updated.statusVerifikasi && updated.statusVerifikasi !== 'pending') {
+      const pembuat = await this.notifikasi.pembuatRumahTangga(id);
+      if (pembuat && pembuat !== actorId) {
+        const diterima = updated.statusVerifikasi === 'verified';
+        await this.notifikasi.kirim({
+          kanal: 'in_app',
+          userId: pembuat,
+          judul: diterima ? 'Data rumah tangga terverifikasi' : 'Data rumah tangga ditolak',
+          pesan: `Data yang Anda input (${id.slice(0, 8)}) ${diterima ? 'lolos verifikasi' : 'ditolak verifikator'}${dto.catatan ? `: ${dto.catatan}` : '.'}`,
+          entityType: 'rumah_tangga',
+          entityId: id,
+        });
+      }
+    }
 
     return updated;
   }

@@ -103,23 +103,30 @@ export class CreateRumahTanggaDto {
   @Type(() => AnggotaDto)
   anggota: AnggotaDto[];
 
-  // Optional: link to a program period
-  @IsOptional()
-  @IsUUID()
-  @ApiProperty({ required: false })
-  periode_id?: string;
+  // Wajib: dedup NIK/No. KK discope per periode, dan unique index Postgres
+  // menganggap NULL selalu berbeda — baris tanpa periode tidak pernah benar-benar
+  // terlindungi dari duplikat. Form pendataan & import CSV selalu mengirimnya.
+  @IsUUID('all', { message: 'periode_id wajib diisi (UUID periode program)' })
+  @ApiProperty({ description: 'Periode program tempat rumah tangga ini didata' })
+  periode_id: string;
 
-  // Wallet penerima — dikumpulkan di sini alih-alih di-derive palsu saat build-merkle
-  // (lihat blockchain.service.ts). 'mandiri' butuh wallet_address; kalau kosong dan
-  // jenis_wallet dikirim 'custodial', backend generate wallet deterministik sebagai
-  // placeholder pendamping desa (lihat rumah-tangga.service.ts create()).
-  @IsOptional()
-  @Matches(/^0x[a-fA-F0-9]{40}$/, { message: 'wallet_address harus alamat Ethereum 0x + 40 hex char' })
-  @ApiProperty({ required: false, example: '0x1234567890abcdef1234567890abcdef12345678' })
-  wallet_address?: string;
+  // Wallet penerima — WAJIB sejak 2026-09-22 (keputusan produk, lihat
+  // 15-Checklist-Belum-Terimplementasi.md): dana ke placeholder custodial
+  // (`deriveCustodialWallet()`) terkunci selamanya karena tidak ada private key
+  // di baliknya, jadi pendataan baru tidak lagi boleh membuat baris tanpa wallet
+  // asli. `deriveCustodialWallet()` sendiri TIDAK dihapus — tetap dipakai
+  // `blockchain.service.ts` sebagai fallback murni untuk baris lama yang dibuat
+  // sebelum kolom ini ada, tidak lagi bisa dipicu dari jalur create ini.
+  @IsString()
+  @Matches(/^0x[a-fA-F0-9]{40}$/, { message: 'wallet_address wajib diisi — alamat Ethereum 0x + 40 hex char (wallet mandiri penerima)' })
+  @ApiProperty({ example: '0x1234567890abcdef1234567890abcdef12345678', description: 'Wallet mandiri penerima — wajib' })
+  wallet_address: string;
 
+  // 'custodial' sengaja tidak lagi diterima di sini — lihat catatan di atas.
+  // Enum dipertahankan (bukan dihapus) supaya baris ini gampang dibuka lagi
+  // kalau kelak ada penyedia custodial sungguhan (MPC/HSM).
   @IsOptional()
-  @IsEnum(['mandiri', 'custodial'] as const)
-  @ApiProperty({ required: false, enum: ['mandiri', 'custodial'] })
+  @IsEnum(['mandiri'] as const)
+  @ApiProperty({ required: false, enum: ['mandiri'], default: 'mandiri' })
   jenis_wallet?: string;
 }

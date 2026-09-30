@@ -12,6 +12,8 @@ import { BlockchainModule } from './blockchain/blockchain.module';
 import { PublicModule } from './public/public.module';
 import { AuditModule } from './audit/audit.module';
 import { SanggahanModule } from './sanggahan/sanggahan.module';
+import { UsersModule } from './users/users.module';
+import { NotifikasiModule } from './notifikasi/notifikasi.module';
 
 @Module({
   imports: [
@@ -30,6 +32,8 @@ import { SanggahanModule } from './sanggahan/sanggahan.module';
     PublicModule,
     AuditModule,
     SanggahanModule,
+    UsersModule,
+    NotifikasiModule,
   ],
   controllers: [AppController],
 })

@@ -1,7 +1,7 @@
-import { Controller, Post, Get, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { MiningService } from './mining.service';
-import { RunClusteringDto, RunTopsisDto, RunAlokasiDto, FinalizeRankingDto } from './dto/mining.dto';
+import { RunClusteringDto, RunTopsisDto, RunAlokasiDto, FinalizeRankingDto, BatalkanApprovalDto } from './dto/mining.dto';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 
@@ -16,7 +16,7 @@ export class MiningController {
     @Param('id') periodeId: string,
     @Body() dto: RunClusteringDto
   ) {
-    return this.miningService.runClustering(periodeId, dto.k, dto.fitur);
+    return this.miningService.runClustering(periodeId, dto.k);
   }
 
   @Get(':id/clustering-result')
@@ -55,8 +55,20 @@ export class MiningController {
   @Post(':id/finalize-ranking')
   async finalizeRanking(
     @Param('id') periodeId: string,
-    @Body() dto: FinalizeRankingDto
+    @Body() dto: FinalizeRankingDto,
+    @Request() req: any,
   ) {
-    return this.miningService.finalizeRanking(periodeId, dto.approvedBy, dto.catatan);
+    // Penyetuju diambil dari token, bukan dari body: `approvedBy` di body bisa diisi
+    // ID admin lain dan jejak audit akan mencatat orang yang salah.
+    return this.miningService.finalizeRanking(periodeId, req.user?.id ?? dto.approvedBy, dto.catatan);
+  }
+
+  @Post(':id/batalkan-approval')
+  async batalkanApproval(
+    @Param('id') periodeId: string,
+    @Body() dto: BatalkanApprovalDto,
+    @Request() req: any,
+  ) {
+    return this.miningService.batalkanApproval(periodeId, req.user.id, dto.alasan);
   }
 }

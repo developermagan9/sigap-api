@@ -80,22 +80,23 @@ enum WalletType {
 /// Wilayah KERJA program — subset desa/kelurahan yang benar-benar didata.
 /// Sengaja bukan salinan seluruh Indonesia: `user.wilayah_id` memakai tabel ini
 /// sebagai batas kewenangan, dan dropdown pendataan petugas memilih dari sini.
-/// Barisnya dibuat dengan memilih dari `wilayah_referensi` (lihat WilayahService.create).
+/// Barisnya dibuat dengan memilih dari `wilayah_referensi` (lihat WilayahService.pastikanWilayahKerja).
 model Wilayah {
-  id        String @id @default(uuid()) @db.Uuid
+  id        String  @id @default(uuid()) @db.Uuid
   /// Kode Kepmendagri tingkat desa (`PP.KK.CC.DDDD`) dari `wilayah_referensi`.
   /// Unik supaya satu desa tidak bisa terdaftar dua kali sebagai wilayah kerja —
   /// nama desa TIDAK unik di Indonesia (27.544 desa memakai nama yang juga
   /// dipakai desa lain; "Sidomulyo" saja ada 98), jadi nama tidak bisa jadi kunci.
   /// Nullable untuk baris lama yang dibuat sebelum referensi wilayah ada.
   kode      String? @unique @db.VarChar(13)
-  provinsi  String @db.VarChar(100)
-  kabupaten String @db.VarChar(100)
-  kecamatan String @db.VarChar(100)
-  desa      String @db.VarChar(100)
+  provinsi  String  @db.VarChar(100)
+  kabupaten String  @db.VarChar(100)
+  kecamatan String  @db.VarChar(100)
+  desa      String  @db.VarChar(100)
 
   rumahTangga RumahTangga[]
   users       User[]
+  userAkses   UserWilayah[]
 
   @@map("wilayah")
 }
@@ -125,18 +126,46 @@ model User {
   passwordHash  String    @map("password_hash") @db.VarChar(255)
   nama          String    @db.VarChar(255)
   role          UserRole
+  /// Wilayah kerja UTAMA — dipertahankan sebagai default/tampilan dan supaya data
+  /// lama tetap sah. Kewenangan sebenarnya adalah gabungan kolom ini dengan
+  /// seluruh baris `UserWilayah` di bawah (lihat common/wilayah-scope.ts).
   wilayahId     String?   @map("wilayah_id") @db.Uuid
   walletAddress String?   @map("wallet_address") @db.VarChar(42)
   isActive      Boolean   @default(true) @map("is_active")
+  /// Dinaikkan saat ganti/reset password, perubahan role, atau penonaktifan. JWT
+  /// membawa nilai saat ditandatangani; token versi lama ditolak (cabut semua sesi).
+  tokenVersion  Int       @default(0) @map("token_version")
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
   lastLoginAt   DateTime? @map("last_login_at") @db.Timestamptz
 
   wilayah           Wilayah?           @relation(fields: [wilayahId], references: [id], onDelete: SetNull)
+  wilayahAkses      UserWilayah[]
   auditLogs         AuditLog[]
+  notifikasi        Notifikasi[]
   sanggahanDiajukan SanggahanRequest[] @relation("SanggahanDiajukan")
   sanggahanDitinjau SanggahanRequest[] @relation("SanggahanDitinjau")
 
   @@map("users")
+}
+
+/// Wilayah kerja TAMBAHAN seorang user (relasi many-to-many user–wilayah).
+///
+/// `User.wilayahId` tunggal tidak bisa mewakili verifikator tingkat kecamatan
+/// atau dinas yang membawahi beberapa desa sekaligus — sebelum tabel ini ada,
+/// satu-satunya cara adalah membuat satu akun per desa. Kolom `wilayahId` lama
+/// TIDAK dihapus: ia tetap jadi wilayah utama (dipakai sebagai default form dan
+/// label di UI), dan kewenangan efektif = gabungan keduanya.
+model UserWilayah {
+  userId    String @map("user_id") @db.Uuid
+  wilayahId String @map("wilayah_id") @db.Uuid
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wilayah Wilayah @relation(fields: [wilayahId], references: [id], onDelete: Cascade)
+
+  @@id([userId, wilayahId])
+  /// Menopang "siapa saja yang berwenang atas wilayah ini".
+  @@index([wilayahId])
+  @@map("user_wilayah")
 }
 
 model RumahTangga {
@@ -156,8 +185,11 @@ model RumahTangga {
   // Wallet penerima dikumpulkan saat pendataan — dipakai langsung sebagai `recipient`
   // saat build-merkle, menggantikan alamat palsu yang sebelumnya di-derive dari hash NIK.
   // `mandiri` = wallet milik penerima sendiri; `custodial` = dikelola pendamping desa
-  // (lihat 07-Security-Privacy-Ethics.md §6). Nullable karena belum wajib di seluruh alur —
-  // fallback custodial deterministik tetap ada di blockchain.service.ts bila kosong.
+  // (lihat 07-Security-Privacy-Ethics.md §6). Wajib untuk baris baru sejak 2026-09-22
+  // (`CreateRumahTanggaDto.wallet_address` tidak lagi opsional) — kolom ini tetap
+  // nullable di skema hanya supaya baris LAMA yang dibuat sebelum aturan ini berlaku
+  // tetap sah; fallback custodial deterministik di blockchain.service.ts hanya
+  // dipicu untuk baris lama itu, tidak bisa lagi terjadi dari jalur create().
   walletAddress           String?          @map("wallet_address") @db.VarChar(42)
   jenisWallet             WalletType?      @map("jenis_wallet")
   // Hasil assignment K-Means terakhir untuk baris ini (05-Algorithm-Design.md §3).
@@ -250,6 +282,13 @@ model PeriodeProgram {
   merkleRoot       String?       @map("merkle_root") @db.VarChar(66)
   contractAddress  String?       @map("contract_address") @db.VarChar(42)
   txHash           String?       @map("tx_hash") @db.VarChar(66)
+  /// Batas waktu klaim yang sudah ditetapkan on-chain (`BansosDisbursement.batasKlaim`).
+  batasKlaim       DateTime?     @map("batas_klaim") @db.Timestamptz
+  /// Klaim ditutup (sisa dana ditarik, penerima yang belum klaim ditandai `failed`).
+  klaimDitutupAt   DateTime?     @map("klaim_ditutup_at") @db.Timestamptz
+  /// Tx `tarikSisaDana()`; null bila saat penutupan saldo kontrak sudah nol.
+  txTarikSisa      String?       @map("tx_tarik_sisa") @db.VarChar(66)
+  sisaDanaDitarik  Decimal?      @map("sisa_dana_ditarik") @db.Decimal(18, 2)
   status           ProgramStatus @default(draft)
   createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz
@@ -335,6 +374,44 @@ model AuditLog {
   actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@map("audit_log")
+}
+
+/// Token JWT yang dicabut lewat logout (per token, bukan per user). Baris boleh
+/// dibuang setelah `expiresAt` — token itu toh sudah ditolak karena kedaluwarsa.
+model RevokedToken {
+  jti       String   @id @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+
+  @@index([expiresAt])
+  @@map("revoked_token")
+}
+
+enum KanalNotifikasi {
+  in_app
+  sms_mock
+}
+
+/// Notifikasi mock (01-PRD.md: "Notifikasi SMS/WA produksi — cukup mock/log").
+/// `in_app` untuk pengguna internal (dibaca di halaman /notifikasi); `sms_mock`
+/// untuk warga — tidak dikirim ke mana pun, hanya dicatat di sini + log server
+/// sebagai outbox yang bisa diperiksa admin.
+model Notifikasi {
+  id         String          @id @default(uuid()) @db.Uuid
+  kanal      KanalNotifikasi
+  userId     String?         @map("user_id") @db.Uuid
+  /// Tujuan eksternal untuk `sms_mock` (referensi penerima / wallet) — bukan nomor HP.
+  tujuan     String?         @db.VarChar(100)
+  judul      String          @db.VarChar(200)
+  pesan      String          @db.Text
+  entityType String?         @map("entity_type") @db.VarChar(50)
+  entityId   String?         @map("entity_id") @db.Uuid
+  dibacaAt   DateTime?       @map("dibaca_at") @db.Timestamptz
+  createdAt  DateTime        @default(now()) @map("created_at") @db.Timestamptz
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, dibacaAt])
+  @@map("notifikasi")
 }
 
 /// Jalur sanggahan/koreksi data — 01-PRD.md (tabel risiko titik cutoff) dan

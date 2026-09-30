@@ -24,7 +24,7 @@ export class RumahTanggaController {
   @Post()
   @Roles('petugas', 'admin')
   create(@Body() dto: CreateRumahTanggaDto, @Request() req: any) {
-    return this.rumahTanggaService.create(dto, req.user?.id);
+    return this.rumahTanggaService.create(dto, req.user?.id, req.user);
   }
 
   @Post('import')
@@ -50,7 +50,7 @@ export class RumahTanggaController {
         HttpStatus.BAD_REQUEST,
       );
     }
-    return this.rumahTanggaService.importCsv(file.buffer, req.user?.id, periodeId);
+    return this.rumahTanggaService.importCsv(file.buffer, req.user?.id, periodeId, req.user);
   }
 
   @Patch(':id/verifikasi')
@@ -61,6 +61,19 @@ export class RumahTanggaController {
     @Request() req: any,
   ) {
     return this.rumahTanggaService.verifikasi(id, dto, req.user?.id, req.user);
+  }
+
+  @Get(':id')
+  @Roles('admin', 'verifikator', 'petugas')
+  @ApiOperation({
+    summary: 'Detail satu rumah tangga beserta PII yang didekripsi',
+    description:
+      'Satu-satunya jalur PII (nama, alamat, NIK, anggota keluarga) keluar dari sistem. ' +
+      'Di-scope wilayah seperti aksi tulis (403 di luar kewenangan) dan SETIAP pembacaan ' +
+      'dicatat audit log sebagai `LIHAT_PII`.',
+  })
+  findOne(@Param('id') id: string, @Request() req: any) {
+    return this.rumahTanggaService.findOne(id, req.user?.id, req.user);
   }
 
   @Get()
