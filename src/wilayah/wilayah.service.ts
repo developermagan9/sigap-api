@@ -23,21 +23,6 @@ export class WilayahService {
     });
   }
 
-  async findOne(id: string) {
-    const wilayah = await this.prisma.wilayah.findUnique({
-      where: { id },
-    });
-
-    if (!wilayah) {
-      throw new NotFoundException({
-        code: 'TIDAK_DITEMUKAN',
-        message: `Wilayah dengan ID '${id}' tidak ditemukan`,
-      });
-    }
-
-    return wilayah;
-  }
-
   /**
    * Satu tingkat referensi wilayah: anak langsung dari `induk`.
    *

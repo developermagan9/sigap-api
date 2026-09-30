@@ -29,50 +29,6 @@ export class AuditService {
     });
   }
 
-  async findByEntity(entityType: string, entityId: string) {
-    return this.prisma.auditLog.findMany({
-      where: {
-        entityType,
-        entityId,
-      },
-      include: {
-        actor: {
-          select: {
-            id: true,
-            nama: true,
-            username: true,
-            role: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-  }
-
-  async findByPeriode(periodeId: string) {
-    return this.prisma.auditLog.findMany({
-      where: {
-        entityType: 'periode_program',
-        entityId: periodeId,
-      },
-      include: {
-        actor: {
-          select: {
-            id: true,
-            nama: true,
-            username: true,
-            role: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-  }
-
   async findAll(page: number = 1, limit: number = 20) {
     const pageNum = Math.max(1, Number(page) || 1);
     const limitNum = Math.max(1, Number(limit) || 20);

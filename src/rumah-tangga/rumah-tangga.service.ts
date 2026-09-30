@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { parse as parseCsv } from 'csv-parse/sync';
 import { plainToInstance } from 'class-transformer';

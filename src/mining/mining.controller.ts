@@ -16,7 +16,7 @@ export class MiningController {
     @Param('id') periodeId: string,
     @Body() dto: RunClusteringDto
   ) {
-    return this.miningService.runClustering(periodeId, dto.k, dto.fitur);
+    return this.miningService.runClustering(periodeId, dto.k);
   }
 
   @Get(':id/clustering-result')

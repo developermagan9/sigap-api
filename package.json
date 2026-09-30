@@ -31,7 +31,6 @@
     "@nestjs/platform-express": "^11.1.0",
     "@nestjs/swagger": "^11.0.0",
     "@nestjs/throttler": "^6.5.0",
-    "@openzeppelin/merkle-tree": "^1.0.7",
     "@prisma/client": "^5.22.0",
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",

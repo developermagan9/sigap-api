@@ -1,4 +1,4 @@
-import { IsString, IsNumber, IsOptional, IsObject, IsEnum, IsArray, Min } from 'class-validator';
+import { IsString, IsNumber, IsOptional, IsObject, IsEnum, Min } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreatePeriodeDto {

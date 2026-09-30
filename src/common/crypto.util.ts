@@ -46,12 +46,6 @@ function encKey(): Buffer {
   return encKeyCache;
 }
 
-/** Hanya untuk test: buang cache supaya perubahan env ikut terbaca. */
-export function resetKunciCache(): void {
-  pepperCache = null;
-  encKeyCache = null;
-}
-
 /**
  * SHA-256 hash with system pepper.
  * Used for NIK, No. KK hashing to prevent rainbow table attacks on 16-digit NIK space.

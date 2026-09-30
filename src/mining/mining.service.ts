@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { KMeansService, LABEL_KERENTANAN } from './kmeans.service';
@@ -55,8 +55,6 @@ const FAKTOR_CLUSTER_DEFAULT: Record<string, number> = {
 
 @Injectable()
 export class MiningService {
-  private readonly logger = new Logger(MiningService.name);
-
   constructor(
     private prisma: PrismaService,
     private audit: AuditService,
@@ -70,7 +68,7 @@ export class MiningService {
   /**
    * Run K-Means clustering on verified households for a period.
    */
-  async runClustering(periodeId: string, k?: number, fitur?: string[]) {
+  async runClustering(periodeId: string, k?: number) {
     const periode = await this.prisma.periodeProgram.findUnique({ where: { id: periodeId } });
     if (!periode) {
       throw new HttpException({ code: 'TIDAK_DITEMUKAN', message: 'Periode tidak ditemukan' }, HttpStatus.NOT_FOUND);

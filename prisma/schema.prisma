@@ -80,7 +80,7 @@ enum WalletType {
 /// Wilayah KERJA program — subset desa/kelurahan yang benar-benar didata.
 /// Sengaja bukan salinan seluruh Indonesia: `user.wilayah_id` memakai tabel ini
 /// sebagai batas kewenangan, dan dropdown pendataan petugas memilih dari sini.
-/// Barisnya dibuat dengan memilih dari `wilayah_referensi` (lihat WilayahService.create).
+/// Barisnya dibuat dengan memilih dari `wilayah_referensi` (lihat WilayahService.pastikanWilayahKerja).
 model Wilayah {
   id        String  @id @default(uuid()) @db.Uuid
   /// Kode Kepmendagri tingkat desa (`PP.KK.CC.DDDD`) dari `wilayah_referensi`.

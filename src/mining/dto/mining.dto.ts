@@ -4,11 +4,6 @@ export class RunClusteringDto {
   @IsNumber()
   @IsOptional()
   k?: number;
-
-  @IsArray()
-  @IsString({ each: true })
-  @IsOptional()
-  fitur?: string[];
 }
 
 export class RunTopsisDto {

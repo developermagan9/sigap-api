@@ -154,7 +154,7 @@ async function main() {
   }
 
   // 3. Seed Periode Program
-  const periode = await prisma.periodeProgram.upsert({
+  await prisma.periodeProgram.upsert({
     where: { id: 'a1234567-89ab-4def-8123-456789abcdef' },
     update: {},
     create: {
