@@ -44,6 +44,14 @@ services:
       NODE_ENV: "production"
       PORT: "3001"
       CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:3000}"
+      # Chain (opsional). Kosong semua = submit on-chain berjalan sebagai simulasi.
+      RPC_URL: "${RPC_URL:-}"
+      CHAIN_ID: "${CHAIN_ID:-}"
+      ADMIN_PRIVATE_KEY: "${ADMIN_PRIVATE_KEY:-}"
+      REGISTRY_CONTRACT_ADDRESS: "${REGISTRY_CONTRACT_ADDRESS:-}"
+      DISBURSEMENT_CONTRACT_ADDRESS: "${DISBURSEMENT_CONTRACT_ADDRESS:-}"
+      DANA_TOKEN_ADDRESS: "${DANA_TOKEN_ADDRESS:-}"
+      CLAIM_SYNC_INTERVAL_MS: "${CLAIM_SYNC_INTERVAL_MS:-30000}"
     ports:
       - "3001:3001"
     healthcheck:

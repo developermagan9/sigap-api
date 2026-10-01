@@ -60,6 +60,21 @@ pipeline {
     // main.ts sudah mem-parse-nya). FE VPS di port 3000, plus localhost untuk
     // dev lokal yang menembak API ini.
     CORS_ORIGIN  = 'http://43.133.144.108:3000,http://localhost:3000'
+
+    // Chain uji: node Hardhat yang jalan di VPS sebagai container `sigap-hardhat`
+    // di network `sigap-api_default` (chain id 31337). Private key di bawah adalah
+    // akun #0 bawaan Hardhat yang dipublikasikan Hardhat sendiri — hanya untuk
+    // chain uji ini, jangan dipakai di jaringan lain. Alamat kontrak berasal dari
+    // `scripts/deploy.ts` di sigap-contracts; chain di-reset tiap node dinyalakan
+    // ulang, jadi kontrak harus di-deploy lagi dan alamatnya dicocokkan di sini.
+    // Kosongkan RPC_URL untuk kembali ke mode simulasi.
+    RPC_URL                       = 'http://sigap-hardhat:8545'
+    CHAIN_ID                      = '31337'
+    ADMIN_PRIVATE_KEY             = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+    REGISTRY_CONTRACT_ADDRESS     = '0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0'
+    DISBURSEMENT_CONTRACT_ADDRESS = '0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9'
+    DANA_TOKEN_ADDRESS            = '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+    CLAIM_SYNC_INTERVAL_MS        = '5000'
   }
 
   stages {
@@ -124,6 +139,8 @@ pipeline {
           sh '''
             set -e
             export IMAGE_TAG CORS_ORIGIN COMPOSE_PROJECT_NAME
+            export RPC_URL CHAIN_ID ADMIN_PRIVATE_KEY REGISTRY_CONTRACT_ADDRESS \
+                   DISBURSEMENT_CONTRACT_ADDRESS DANA_TOKEN_ADDRESS CLAIM_SYNC_INTERVAL_MS
 
             # Preflight port: kalau 3001 dipegang container DI LUAR project ini,
             # `up` gagal dengan pesan daemon ("Bind for 0.0.0.0:3001 failed:
