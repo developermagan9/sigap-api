@@ -64,6 +64,9 @@ const AMBANG_MIRIP = 0.85;
 /** Berapa kandidat teratas hasil prefilter trigram yang dicek penuh dengan Jaro-Winkler. */
 const KANDIDAT_FUZZY_MAKS = 50;
 
+/** Batas atas `limit` daftar rumah tangga (halaman hasil clustering meminta 1000). */
+const LIMIT_DAFTAR_MAKS = 1000;
+
 /** Baris wilayah kerja yang dipakai importer CSV untuk mencocokkan kolom wilayah. */
 export type BarisWilayah = { id: string; kode: string | null; desa: string; kecamatan: string; kabupaten: string };
 
@@ -611,11 +614,19 @@ export class RumahTanggaService {
   }
 
   async findAll(
-    filters: { wilayah_id?: string; periode_id?: string; status?: string; page?: number; limit?: number },
+    filters: {
+      wilayah_id?: string;
+      periode_id?: string;
+      status?: string;
+      flagged?: boolean;
+      page?: number;
+      limit?: number;
+    },
     user?: PenggunaBerwilayah,
   ) {
-    const page = filters.page || 1;
-    const limit = filters.limit || 10;
+    // `|| default` juga menangkap NaN dari `parseInt` pada query string yang bukan angka.
+    const page = Math.max(1, Math.floor(filters.page as number) || 1);
+    const limit = Math.min(LIMIT_DAFTAR_MAKS, Math.max(1, Math.floor(filters.limit as number) || 10));
     const skip = (page - 1) * limit;
 
     const where: any = {};
@@ -630,13 +641,24 @@ export class RumahTanggaService {
     if (filters.periode_id) {
       where.periodeId = filters.periode_id;
     }
+
+    // Ringkasan dihitung dari cakupan (wilayah + periode) SEBELUM filter status/flag,
+    // supaya kartu statistik di UI tidak berubah angkanya hanya karena daftar disaring.
+    const cakupan = { ...where };
+
     if (filters.status) {
       where.statusVerifikasi = filters.status;
     }
+    if (filters.flagged) {
+      where.flaggedDuplicate = true;
+    }
 
-    const [data, total] = await Promise.all([
+    const [data, total, perStatus, perluCekDuplikat] = await Promise.all([
       this.prisma.rumahTangga.findMany({
         where,
+        // Tanpa orderBy Postgres memberi urutan sesukanya dan skip/take bisa
+        // mengulang atau melewatkan baris antar halaman. `id` jadi pemutus seri.
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         skip,
         take: limit,
         include: {
@@ -644,7 +666,17 @@ export class RumahTanggaService {
         },
       }),
       this.prisma.rumahTangga.count({ where }),
+      this.prisma.rumahTangga.groupBy({ by: ['statusVerifikasi'], where: cakupan, _count: { _all: true } }),
+      this.prisma.rumahTangga.count({
+        where: { ...cakupan, flaggedDuplicate: true, statusVerifikasi: 'pending' },
+      }),
     ]);
+
+    const jumlah = (status: string) =>
+      perStatus.find((g: { statusVerifikasi: string }) => g.statusVerifikasi === status)?._count._all ?? 0;
+    const pending = jumlah('pending');
+    const verified = jumlah('verified');
+    const rejected = jumlah('rejected');
 
     return {
       data,
@@ -653,6 +685,15 @@ export class RumahTanggaService {
         page,
         limit,
         totalPages: Math.ceil(total / limit),
+        // `perlu_cek_duplikat` = ditandai mirip DAN belum diputuskan; yang sudah
+        // diputuskan verifikator tidak lagi perlu dicek.
+        ringkasan: {
+          total: pending + verified + rejected,
+          pending,
+          verified,
+          rejected,
+          perlu_cek_duplikat: perluCekDuplikat,
+        },
       },
     };
   }

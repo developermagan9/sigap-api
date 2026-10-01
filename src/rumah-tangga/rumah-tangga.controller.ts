@@ -83,6 +83,7 @@ export class RumahTanggaController {
     @Query('wilayah_id') wilayah_id?: string,
     @Query('periode_id') periode_id?: string,
     @Query('status') status?: string,
+    @Query('flagged') flagged?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
@@ -91,6 +92,7 @@ export class RumahTanggaController {
         wilayah_id,
         periode_id,
         status,
+        flagged: flagged === 'true',
         page: page ? parseInt(page, 10) : 1,
         limit: limit ? parseInt(limit, 10) : 10,
       },
